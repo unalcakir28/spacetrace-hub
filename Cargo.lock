@@ -405,7 +405,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1054,7 +1054,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1207,7 +1207,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1220,7 +1220,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1277,7 +1277,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1478,7 +1478,7 @@ dependencies = [
 [[package]]
 name = "spacetrace-diff"
 version = "0.1.0"
-source = "git+https://github.com/unalcakir28/spacetrace#a4a36a6e30294f671997858bdd52da7d7f201a83"
+source = "git+https://github.com/unalcakir28/spacetrace#281d1e82c9c73ca4e7fcf234f138a54a31ce3552"
 dependencies = [
  "serde",
  "spacetrace-scan-core",
@@ -1509,7 +1509,7 @@ dependencies = [
 [[package]]
 name = "spacetrace-scan-core"
 version = "0.1.0"
-source = "git+https://github.com/unalcakir28/spacetrace#a4a36a6e30294f671997858bdd52da7d7f201a83"
+source = "git+https://github.com/unalcakir28/spacetrace#281d1e82c9c73ca4e7fcf234f138a54a31ce3552"
 dependencies = [
  "libc",
  "rayon",
@@ -1520,7 +1520,7 @@ dependencies = [
 [[package]]
 name = "spacetrace-store"
 version = "0.1.0"
-source = "git+https://github.com/unalcakir28/spacetrace#a4a36a6e30294f671997858bdd52da7d7f201a83"
+source = "git+https://github.com/unalcakir28/spacetrace#281d1e82c9c73ca4e7fcf234f138a54a31ce3552"
 dependencies = [
  "anyhow",
  "gethostname",
@@ -1597,10 +1597,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2003,7 +2003,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2026,15 +2026,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]
