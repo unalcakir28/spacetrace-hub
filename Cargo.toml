@@ -1,0 +1,46 @@
+[package]
+name = "spacetrace-hub"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Self-hosted fleet dashboard for spacetrace agents"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "spacetrace-hub"
+path = "src/main.rs"
+
+[lib]
+name = "spacetrace_hub"
+path = "src/lib.rs"
+
+[dependencies]
+# The snapshot format and store come from the open-source core, so a snapshot
+# pushed by an agent needs no conversion here at all.
+spacetrace-scan-core = { git = "https://github.com/unalcakir28/spacetrace" }
+spacetrace-store = { git = "https://github.com/unalcakir28/spacetrace" }
+spacetrace-diff = { git = "https://github.com/unalcakir28/spacetrace" }
+
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+getrandom = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+toml = "1"
+zstd = "0.14"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "json", "form"] }
+
+[dev-dependencies]
+spacetrace-scan-core = { git = "https://github.com/unalcakir28/spacetrace" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,44 @@
+# One command to a running hub:
+#
+#   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > admin-token
+#   cat > hub.toml <<'CONF'
+#   db = "/var/lib/spacetrace-hub/hub.sqlite"
+#   listen = "0.0.0.0:8080"
+#   admin_token_file = "/run/secrets/admin-token"
+#   keep_per_target = 90
+#   CONF
+#   docker compose up -d
+#
+# Then open http://localhost:8080, sign in with the contents of ./admin-token,
+# and create an agent token on the Agents page.
+#
+# Put a reverse proxy with TLS in front of this before exposing it beyond your
+# own network: the dashboard lists every path on every machine you watch.
+
+services:
+  hub:
+    build: .
+    # Or, once a release is published:
+    # image: ghcr.io/unalcakir28/spacetrace-hub:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    # The token is read from the mounted secret by hub.toml's
+    # admin_token_file, so it is never baked into the image or this file.
+    secrets:
+      - admin-token
+    volumes:
+      - hub-data:/var/lib/spacetrace-hub
+      - ./hub.toml:/etc/spacetrace-hub/hub.toml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+
+secrets:
+  admin-token:
+    file: ./admin-token
+
+volumes:
+  hub-data:
