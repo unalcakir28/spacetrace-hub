@@ -179,9 +179,13 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
+        # Regular files only, and never the sums file itself: `sha256sum ./*`
+        # dies on the first directory it meets, which is how a stray folder in
+        # an artifact takes the whole release down.
         run: |
           cd artifacts
-          sha256sum ./* > SHA256SUMS
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -exec sha256sum {} + \
+            | sort -k2 > SHA256SUMS
           cat SHA256SUMS
 
       - name: Where do these go
