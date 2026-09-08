@@ -347,7 +347,9 @@ async fn a_pushed_snapshot_appears_on_the_dashboard() {
     assert!(html.contains("nas"), "the host should be listed");
 
     // Recording last_seen_at is what makes the Agents page useful.
-    assert!(db::list_tokens(&hub.conn()).unwrap()[0].last_seen_at.is_some());
+    assert!(db::list_tokens(&hub.conn()).unwrap()[0]
+        .last_seen_at
+        .is_some());
 }
 
 #[tokio::test]
