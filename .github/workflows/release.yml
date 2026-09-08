@@ -1,0 +1,260 @@
+name: Release
+
+# Two outputs, one pipeline:
+#
+#   * static binaries, published **into the public repo**
+#     (unalcakir28/spacetrace) — a private repository's release assets need a
+#     credential to download and a download page cannot supply one, so the
+#     source stays private and the binaries are public. See RELEASING.md.
+#   * a container image on ghcr.io, amd64 and arm64, assembled from those same
+#     binaries rather than compiled under emulation.
+#
+#   push to main   -> tag `hub-continuous` and image tags `main` / `edge`
+#   push of a v*   -> tag `hub-v…` and image tags `v…` / `latest`
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore:
+      - "*.md"
+      - "tasks/**"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version to build as, e.g. v0.1.0-test"
+        required: true
+      publish:
+        description: >-
+          Publish the result. Off by default, so a dispatch is a dry run.
+          Turn it on to release a tag by hand — which is the way out if the
+          paths-ignore filter above skipped a tag push.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOWNLOAD_REPO: unalcakir28/spacetrace
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  meta:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      rolling: ${{ steps.pick.outputs.rolling }}
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - id: pick
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "${INPUT_TAG:-}" ]; then
+            version="$INPUT_TAG"; rolling=false
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"; rolling=false
+          else
+            version=continuous; rolling=true
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "rolling=$rolling" >> "$GITHUB_OUTPUT"
+          echo "tag=hub-$version" >> "$GITHUB_OUTPUT"
+          echo "Building as hub-$version" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: meta
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl, so the hub is one file with no runtime to install — the same
+          # promise the agent makes.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            arch: arm64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross-compilation tooling
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          cargo install cross --locked
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin spacetrace-hub
+          else
+            cargo build --release --target ${{ matrix.target }} --bin spacetrace-hub
+          fi
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          name="spacetrace-hub-${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp target/${{ matrix.target }}/release/spacetrace-hub "dist/${name}/"
+          cp README.md docker-compose.yml "dist/${name}/"
+          tar -czf "dist/${name}.tar.gz" -C "dist/${name}" .
+
+      # The raw binary as well as the archive: the image build copies it
+      # straight in, and unpacking a tarball inside a Docker context to get one
+      # file back out is work for nothing.
+      - name: Stage the binary for the image
+        if: matrix.arch != ''
+        shell: bash
+        run: |
+          mkdir -p image/bin/${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/spacetrace-hub image/bin/${{ matrix.arch }}/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch != ''
+        with:
+          name: image-${{ matrix.arch }}
+          # The directory, not a glob: with `image/**` the artifact's root
+          # becomes image/bin/<arch> and the layout the Dockerfile copies from
+          # is lost.
+          path: image
+          if-no-files-found: error
+
+  publish:
+    name: publish ${{ needs.meta.outputs.tag }}
+    needs: [meta, build]
+    # A dispatch is a dry run unless it was asked to publish.
+    if: github.event_name != 'workflow_dispatch' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: archive-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: image
+          pattern: image-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum ./* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Where do these go
+        id: dest
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [ -n "${RELEASE_TOKEN:-}" ]; then
+            echo "repo=$DOWNLOAD_REPO" >> "$GITHUB_OUTPUT"
+          else
+            echo "repo=$GITHUB_REPOSITORY" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Downloads are not public::RELEASE_TOKEN is unset, so the binaries were published into this private repository. Their URLs need a credential to fetch, which the download page cannot supply. RELEASING.md has the one command that fixes it."
+          fi
+
+      - name: Publish the binaries
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ steps.dest.outputs.repo }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          ROLLING: ${{ needs.meta.outputs.rolling }}
+        run: |
+          cat > notes.md <<EOF
+          spacetrace hub, built from \`$GITHUB_REPOSITORY\` at \`${GITHUB_SHA:0:7}\` on $(date -u '+%Y-%m-%d %H:%M UTC').
+
+          One static binary and one SQLite file — no database server, no frontend build.
+
+          \`\`\`sh
+          docker pull ${IMAGE}:${VERSION}
+          \`\`\`
+
+          Setup: https://unalcakir28.github.io/spacetrace/hub.html
+          EOF
+
+          if [ "$ROLLING" = "true" ]; then
+            gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes || true
+            gh release create "$TAG" artifacts/* \
+              --repo "$REPO" \
+              --prerelease \
+              --title "Hub — continuous build (main)" \
+              --notes-file notes.md
+          else
+            gh release create "$TAG" artifacts/* \
+              --repo "$REPO" \
+              --title "spacetrace hub $VERSION" \
+              --notes-file notes.md
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: tags
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          ROLLING: ${{ needs.meta.outputs.rolling }}
+        run: |
+          if [ "$ROLLING" = "true" ]; then
+            echo "list=${IMAGE}:main,${IMAGE}:edge" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${IMAGE}:${VERSION},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: image
+          file: .github/docker/Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.list }}
+          provenance: false

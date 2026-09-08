@@ -1,0 +1,29 @@
+# The release image, assembled from binaries that were already built.
+#
+# The Dockerfile at the repository root compiles from source, which is the right
+# thing for someone reading the code. It is the wrong thing for a multi-arch
+# release build: an arm64 image built that way on an amd64 runner compiles Rust
+# under QEMU, which takes tens of minutes and regularly runs out of memory. The
+# release pipeline cross-compiles both musl binaries natively and this file only
+# copies the right one in — buildx sets TARGETARCH per platform.
+FROM alpine:3.21
+
+ARG TARGETARCH
+
+RUN apk add --no-cache ca-certificates wget \
+    && adduser -S -H -u 10002 spacetrace
+
+COPY bin/${TARGETARCH}/spacetrace-hub /usr/local/bin/spacetrace-hub
+RUN chmod 755 /usr/local/bin/spacetrace-hub
+
+RUN mkdir -p /var/lib/spacetrace-hub && chown spacetrace /var/lib/spacetrace-hub
+VOLUME /var/lib/spacetrace-hub
+
+USER spacetrace
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
+    CMD wget -qO- http://127.0.0.1:8080/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/spacetrace-hub"]
+CMD ["--config", "/etc/spacetrace-hub/hub.toml", "serve"]

@@ -4,3 +4,8 @@
 *.sqlite-shm
 .DS_Store
 data/
+
+# Claude Code working notes and the browser-automation cache; the roadmap lives
+# in the core repo.
+tasks/
+.playwright-mcp/

@@ -8,6 +8,23 @@ Self-hosted, one binary, one SQLite file. No database server, no frontend build,
 no telemetry. **It never touches the machines it watches** — it receives, it
 stores, and it tells you.
 
+## Download
+
+**[unalcakir28.github.io/spacetrace/hub.html](https://unalcakir28.github.io/spacetrace/hub.html)**
+— what it does and how to set it up.
+
+```bash
+docker pull ghcr.io/unalcakir28/spacetrace-hub:main   # amd64 and arm64
+```
+
+Static musl binaries for Linux (x86_64, aarch64) and macOS are on the
+[download page](https://unalcakir28.github.io/spacetrace/download.html#hub).
+They are built here and published into the
+[public core repository's releases](https://github.com/unalcakir28/spacetrace/releases),
+because a private repository's release assets need a credential to download.
+Two channels: `hub-v*` for a tagged release, `hub-continuous` for the newest
+`main`. See [RELEASING.md](RELEASING.md).
+
 ## Status
 
 Phase 4 of the roadmap. Working:
