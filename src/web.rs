@@ -247,6 +247,12 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        // Which build, not just which version. This endpoint needs no
+        // credential, so it is the one thing an operator can read off a
+        // container they are only half sure about — and every continuous build
+        // reports the same version number.
+        "commit": spacetrace_buildinfo::GIT_SHA,
+        "channel": spacetrace_buildinfo::CHANNEL,
     }))
 }
 
@@ -1046,11 +1052,10 @@ async fn about_page(State(state): State<Arc<AppState>>) -> Response {
     let body = format!(
         r#"<h1>About</h1>
 <div class="card">
-<dl class="kv">
 <p><strong>spacetrace-hub {version}</strong></p>
-<p class="hint">Database: <code>{db}</code><br>Uptime: {uptime} s</p>
-</dl>
+<p class="hint">Build: <code>{commit}</code> · {channel}<br>Built: {built}<br>Database: <code>{db}</code><br>Uptime: {uptime} s</p>
 </div>
+{changelog}
 <div class="card">
 <h2 style="margin-top:0">How this fits together</h2>
 <p class="hint">Agents scan their own machines and push snapshots here. The hub
@@ -1065,10 +1070,84 @@ stores, and it tells you.</p>
 </div>
 <form method="post" action="/logout"><button class="danger" type="submit">Sign out</button></form>"#,
         version = env!("CARGO_PKG_VERSION"),
+        commit = spacetrace_buildinfo::GIT_SHA,
+        channel = spacetrace_buildinfo::CHANNEL,
+        built = spacetrace_buildinfo::BUILD_DATE,
         db = escape(&state.db.to_string_lossy()),
         uptime = uptime,
+        changelog = changelog_card(),
     );
     Html(html::page("About", "/about", &body)).into_response()
+}
+
+/// What changed in the hub, newest first.
+///
+/// English, like the rest of this interface: the hub is an operator's tool and
+/// the tool is English (K1). The same entries are translated on the website and
+/// in the desktop app, which are the surfaces a non-English reader uses.
+///
+/// The entries are compiled in rather than fetched, so this page says the same
+/// thing on a machine with no route to the internet — which describes a fair
+/// number of the machines a hub gets installed on.
+fn changelog_card() -> String {
+    use spacetrace_changelog::{changelog, Component, Kind, DEFAULT_LOCALE};
+
+    // Enough to cover "what did I just upgrade through", not the whole history.
+    // The full list is a link away, and this page is not an archive.
+    const SHOW: usize = 5;
+
+    let log = changelog().component(Component::Hub);
+    let mut out =
+        String::from("<div class=\"card\">\n<h2 style=\"margin-top:0\">What changed</h2>\n");
+
+    let mut section = |title: String, entries: &[spacetrace_changelog::Entry]| {
+        out.push_str(&format!("<h3>{title}</h3>\n"));
+        for kind in Kind::ALL {
+            let matching: Vec<_> = entries.iter().filter(|e| e.kind == kind).collect();
+            if matching.is_empty() {
+                continue;
+            }
+            out.push_str(&format!(
+                "<p class=\"hint\"><strong>{}</strong></p>\n<ul>\n",
+                kind.heading()
+            ));
+            for entry in matching {
+                out.push_str(&format!(
+                    "<li>{}</li>\n",
+                    html::inline_code(entry.localized(DEFAULT_LOCALE))
+                ));
+            }
+            out.push_str("</ul>\n");
+        }
+    };
+
+    if !log.unreleased.is_empty() {
+        section("Not released yet".to_string(), &log.unreleased);
+    }
+    for release in log.releases.iter().take(SHOW) {
+        // A version nobody can download must not read like one they can.
+        let milestone = if release.published {
+            String::new()
+        } else {
+            " · development milestone".to_string()
+        };
+        section(
+            format!(
+                "{} — {}{}",
+                escape(&release.version),
+                escape(&release.date),
+                milestone
+            ),
+            &release.entries,
+        );
+    }
+
+    out.push_str(
+        "<p class=\"hint\"><a href=\"https://github.com/unalcakir28/spacetrace/releases\">\
+         All releases</a> · <a href=\"https://spacetrace.teknobakkall.com/changelog/\">\
+         Changelog in five languages</a></p>\n</div>",
+    );
+    out
 }
 
 async fn api_fleet(State(state): State<Arc<AppState>>) -> Response {

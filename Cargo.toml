@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Self-hosted fleet dashboard for spacetrace agents"
-license = "MIT"
+# Commercial, per decision K2 in the core repo; README says the same.
+# It said MIT until 9 Sept 2026, which contradicted both.
+license = "LicenseRef-Proprietary"
 publish = false
 
 [[bin]]
@@ -21,6 +23,10 @@ path = "src/lib.rs"
 spacetrace-scan-core = { git = "https://github.com/unalcakir28/spacetrace" }
 spacetrace-store = { git = "https://github.com/unalcakir28/spacetrace" }
 spacetrace-diff = { git = "https://github.com/unalcakir28/spacetrace" }
+# Release notes, the About page and the version banner all read from the core
+# repo, so the hub cannot drift from what the site and the apps say.
+spacetrace-changelog = { git = "https://github.com/unalcakir28/spacetrace" }
+spacetrace-buildinfo = { git = "https://github.com/unalcakir28/spacetrace" }
 
 anyhow = "1"
 axum = "0.8"

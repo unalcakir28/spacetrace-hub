@@ -16,8 +16,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    # CHANGELOG.md is named out of this list deliberately: it is not
+    # documentation but the release notes themselves, and a push that only
+    # touches it must still rebuild, or the continuous release keeps describing
+    # the version before it. The filter applies to tag pushes too.
     paths-ignore:
-      - "*.md"
+      - "README.md"
+      - "RELEASING.md"
       - "tasks/**"
   workflow_dispatch:
     inputs:
@@ -51,20 +56,39 @@ jobs:
       version: ${{ steps.pick.outputs.version }}
       rolling: ${{ steps.pick.outputs.rolling }}
       tag: ${{ steps.pick.outputs.tag }}
+      channel: ${{ steps.pick.outputs.channel }}
     steps:
+      - uses: actions/checkout@v5
       - id: pick
         env:
           INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
+          tagged=false
           if [ -n "${INPUT_TAG:-}" ]; then
             version="$INPUT_TAG"; rolling=false
           elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            version="$GITHUB_REF_NAME"; rolling=false
+            version="$GITHUB_REF_NAME"; rolling=false; tagged=true
           else
             version=continuous; rolling=true
           fi
+
+          if [ "$rolling" = true ]; then channel=continuous; else channel=release; fi
+
+          # A tag that disagrees with Cargo.toml ships a binary that lies about
+          # its own version: hub-v0.2.0 in the file name, 0.1.0 from /health.
+          # Real tag pushes only — a dispatch often names v0.1.0-test on
+          # purpose, which is supposed to disagree.
+          if [ "$tagged" = true ]; then
+            manifest=$(grep -m1 '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')
+            if [ "$version" != "v$manifest" ]; then
+              echo "::error::tag $version does not match version $manifest in Cargo.toml"
+              exit 1
+            fi
+          fi
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "rolling=$rolling" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "tag=hub-$version" >> "$GITHUB_OUTPUT"
           echo "Building as hub-$version" >> "$GITHUB_STEP_SUMMARY"
 
@@ -110,11 +134,24 @@ jobs:
 
       - name: Build
         shell: bash
+        # Stamped in so /health and the About page can say which build this is,
+        # not only which version — every continuous build shares one number.
+        # Passed through the environment because `cross` builds in a container
+        # with no checkout, and because a build script that shells out to git
+        # only reruns when cargo thinks its inputs changed.
+        #
+        # --locked matters more here than in the core repo: the core crates are
+        # git dependencies with no rev, so without it two builds of one tag can
+        # embed different scanner code.
+        env:
+          SPACETRACE_GIT_SHA: ${{ github.sha }}
+          SPACETRACE_CHANNEL: ${{ needs.meta.outputs.channel }}
         run: |
+          export SPACETRACE_BUILD_DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin spacetrace-hub
+            cross build --release --locked --target ${{ matrix.target }} --bin spacetrace-hub
           else
-            cargo build --release --target ${{ matrix.target }} --bin spacetrace-hub
+            cargo build --release --locked --target ${{ matrix.target }} --bin spacetrace-hub
           fi
 
       - name: Package
@@ -208,6 +245,31 @@ jobs:
           VERSION: ${{ needs.meta.outputs.version }}
           ROLLING: ${{ needs.meta.outputs.rolling }}
         run: |
+          # The changes come out of CHANGELOG.md rather than from a generator.
+          # The generator lives in the core repo and is not a command here, but
+          # CHANGELOG.md is produced from the *pinned* version of that crate and
+          # a test asserts it is current — so slicing it is what guarantees
+          # these notes match the changelog compiled into the binary being
+          # published. Running the tool against the core's main branch would
+          # not.
+          if [ "$ROLLING" = "true" ]; then
+            section="Unreleased"
+          else
+            section="${VERSION#v} — "
+          fi
+          awk -v want="$section" '
+            index($0, "## " want) == 1 { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > changes.md
+
+          # A release with no notes is worse than no release: the reader cannot
+          # tell whether the notes are missing or the version was empty.
+          if [ "$ROLLING" != "true" ] && [ ! -s changes.md ]; then
+            echo "::error::CHANGELOG.md has no section for ${VERSION}"
+            exit 1
+          fi
+
           cat > notes.md <<EOF
           spacetrace hub, built from \`$GITHUB_REPOSITORY\` at \`${GITHUB_SHA:0:7}\` on $(date -u '+%Y-%m-%d %H:%M UTC').
 
@@ -219,6 +281,11 @@ jobs:
 
           Setup: https://spacetrace.teknobakkall.com/hub/
           EOF
+
+          if [ -s changes.md ]; then
+            printf '\n## What changed\n' >> notes.md
+            cat changes.md >> notes.md
+          fi
 
           if [ "$ROLLING" = "true" ]; then
             gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes || true

@@ -31,6 +31,37 @@ pub fn escape(text: &str) -> String {
     out
 }
 
+/// Escape, then turn `backtick` spans into `<code>`.
+///
+/// Changelog entries are written once for five languages and use backticks for
+/// the parts that are the same in all of them — commands, flags, file names.
+/// Escaping first is what makes this safe to do at all: by the time backticks
+/// are looked for, nothing in the text can still open a tag.
+pub fn inline_code(text: &str) -> String {
+    let escaped = escape(text);
+    let parts: Vec<&str> = escaped.split('`').collect();
+
+    // n backticks give n+1 parts, so an even number of parts means an odd
+    // number of backticks: one has no partner. That is a typo in the changelog,
+    // and the unmatched one is rendered as the character it is — emitting a tag
+    // for it would leave a span open and swallow the rest of the page.
+    let balanced = parts.len() % 2 == 1;
+
+    let mut out = String::with_capacity(escaped.len());
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            let unmatched = !balanced && index == parts.len() - 1;
+            match (unmatched, index % 2 == 1) {
+                (true, _) => out.push('`'),
+                (false, true) => out.push_str("<code>"),
+                (false, false) => out.push_str("</code>"),
+            }
+        }
+        out.push_str(part);
+    }
+    out
+}
+
 /// Binary units with one decimal, matching the CLI and the desktop app.
 pub fn bytes(value: u64) -> String {
     const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
@@ -351,5 +382,50 @@ mod tests {
             "body is passed through as markup"
         );
         assert!(html.starts_with("<!doctype html>"));
+    }
+
+    #[test]
+    fn backticks_become_code_and_the_text_around_them_survives() {
+        assert_eq!(
+            inline_code("Use `--no-clone-dedupe` to turn it off."),
+            "Use <code>--no-clone-dedupe</code> to turn it off."
+        );
+        assert_eq!(inline_code("no code here"), "no code here");
+    }
+
+    #[test]
+    fn several_spans_in_one_entry_all_close() {
+        let out = inline_code("`spacetrace diff` and `spacetrace ls`");
+        assert_eq!(
+            out,
+            "<code>spacetrace diff</code> and <code>spacetrace ls</code>"
+        );
+        assert_eq!(
+            out.matches("<code>").count(),
+            out.matches("</code>").count()
+        );
+    }
+
+    /// An odd backtick is a typo in the changelog. It must render as text, not
+    /// leave a tag open and swallow the rest of the page.
+    #[test]
+    fn an_unclosed_backtick_leaves_no_dangling_tag() {
+        // Rendered as the character it is, not as half a tag. Asserting the
+        // whole string rather than counting tags: the first attempt here
+        // balanced the count and still emitted an unclosed `<code>`.
+        assert_eq!(inline_code("a stray ` backtick"), "a stray ` backtick");
+        assert_eq!(
+            inline_code("`spacetrace ls` and a stray ` one"),
+            "<code>spacetrace ls</code> and a stray ` one"
+        );
+    }
+
+    /// Escaping happens first, so nothing inside an entry can open a tag of its
+    /// own — including inside the code span.
+    #[test]
+    fn markup_in_an_entry_is_escaped_even_inside_a_code_span() {
+        let out = inline_code("beware `<script>alert(1)</script>`");
+        assert!(!out.contains("<script>"), "{out}");
+        assert!(out.contains("&lt;script&gt;"), "{out}");
     }
 }

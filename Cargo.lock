@@ -1476,9 +1476,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "spacetrace-buildinfo"
+version = "0.1.0"
+source = "git+https://github.com/unalcakir28/spacetrace#2836fbf9020c76de822988c6ab00570d4178c30d"
+
+[[package]]
+name = "spacetrace-changelog"
+version = "0.1.0"
+source = "git+https://github.com/unalcakir28/spacetrace#2836fbf9020c76de822988c6ab00570d4178c30d"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "spacetrace-diff"
 version = "0.1.0"
-source = "git+https://github.com/unalcakir28/spacetrace#0d016fda4da7806612af7b278e245166a5ae404f"
+source = "git+https://github.com/unalcakir28/spacetrace#2836fbf9020c76de822988c6ab00570d4178c30d"
 dependencies = [
  "serde",
  "spacetrace-scan-core",
@@ -1497,6 +1511,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "spacetrace-buildinfo",
+ "spacetrace-changelog",
  "spacetrace-diff",
  "spacetrace-scan-core",
  "spacetrace-store",
@@ -1509,7 +1525,7 @@ dependencies = [
 [[package]]
 name = "spacetrace-scan-core"
 version = "0.1.0"
-source = "git+https://github.com/unalcakir28/spacetrace#0d016fda4da7806612af7b278e245166a5ae404f"
+source = "git+https://github.com/unalcakir28/spacetrace#2836fbf9020c76de822988c6ab00570d4178c30d"
 dependencies = [
  "libc",
  "rayon",
@@ -1520,7 +1536,7 @@ dependencies = [
 [[package]]
 name = "spacetrace-store"
 version = "0.1.0"
-source = "git+https://github.com/unalcakir28/spacetrace#0d016fda4da7806612af7b278e245166a5ae404f"
+source = "git+https://github.com/unalcakir28/spacetrace#2836fbf9020c76de822988c6ab00570d4178c30d"
 dependencies = [
  "anyhow",
  "gethostname",
