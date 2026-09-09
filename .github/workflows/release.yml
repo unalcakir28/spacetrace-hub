@@ -217,7 +217,7 @@ jobs:
           docker pull ${IMAGE}:${VERSION}
           \`\`\`
 
-          Setup: https://unalcakir28.github.io/spacetrace/hub.html
+          Setup: https://unalcakir28.github.io/spacetrace/hub/
           EOF
 
           if [ "$ROLLING" = "true" ]; then
