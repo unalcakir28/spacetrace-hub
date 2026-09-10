@@ -10,6 +10,12 @@ Versions marked *development milestone* were never tagged and have no
 downloadable files. They are recorded because the work happened, not
 because anyone can install them.
 
+## Unreleased
+
+### Changed
+
+- The About page now lists released versions only. Entries that had landed but were in no release described work your copy does not contain.
+
 ## 0.3.0 — 2026-09-09
 
 ### Added

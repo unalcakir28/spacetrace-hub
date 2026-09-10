@@ -1121,9 +1121,10 @@ fn changelog_card() -> String {
         }
     };
 
-    if !log.unreleased.is_empty() {
-        section("Not released yet".to_string(), &log.unreleased);
-    }
+    // `log.unreleased` is deliberately skipped. Those entries describe code
+    // sitting on main, which is in no build anyone is running — announcing
+    // them on the About page of a binary that does not contain them would be
+    // telling the operator about a change they cannot have.
     for release in log.releases.iter().take(SHOW) {
         // A version nobody can download must not read like one they can.
         let milestone = if release.published {
@@ -1204,6 +1205,28 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The About page must not announce work that is not in this binary.
+    ///
+    /// Counting sections rather than searching for unreleased text keeps the
+    /// test honest: `unreleased` is empty right after every release, which is
+    /// exactly when a regression would otherwise pass unnoticed.
+    #[test]
+    fn the_about_card_lists_releases_only() {
+        use spacetrace_changelog::{changelog, Component};
+
+        let log = changelog().component(Component::Hub);
+        let card = changelog_card();
+
+        let expected = log.releases.len().min(5);
+        assert_eq!(
+            card.matches("<h3>").count(),
+            expected,
+            "one heading per shown release and nothing else; \
+             `unreleased` used to add one of its own"
+        );
+        assert!(!card.contains("Not released yet"));
+    }
 
     #[test]
     fn constant_time_eq_still_compares_correctly() {

@@ -23,8 +23,12 @@ fn changelog_md_matches_its_source() {
 /// The About page reads the hub's own entries. An empty component would render
 /// a heading with nothing under it, which reads as a bug rather than as
 /// "nothing shipped yet".
+///
+/// `releases` alone, not `releases || unreleased`: the page shows released
+/// work only, so unreleased entries cannot stand in for having something to
+/// say.
 #[test]
 fn the_hub_has_something_to_say_for_itself() {
     let log = changelog().component(Component::Hub);
-    assert!(!log.releases.is_empty() || !log.unreleased.is_empty());
+    assert!(!log.releases.is_empty());
 }
