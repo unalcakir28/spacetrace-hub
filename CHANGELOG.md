@@ -10,6 +10,16 @@ Versions marked *development milestone* were never tagged and have no
 downloadable files. They are recorded because the work happened, not
 because anyone can install them.
 
+## Unreleased
+
+### Added
+
+- A pushed snapshot is checked against the checksum it carries and refused with a 400 if it disagrees, instead of joining the fleet. A bit flipped in transit leaves a valid tree holding a wrong number — on a dashboard that sorts by urgency, that is the wrong machine at the top.
+
+### Changed
+
+- The hub's snapshot database moves to a new schema so the checksum has somewhere to live. Downgrading to an older build will no longer open the file — it says so plainly rather than misreading it. Putting a copy aside before upgrading costs nothing.
+
 ## 0.3.1 — 2026-09-10
 
 ### Changed
