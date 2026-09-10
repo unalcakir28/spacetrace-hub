@@ -10,7 +10,7 @@ Versions marked *development milestone* were never tagged and have no
 downloadable files. They are recorded because the work happened, not
 because anyone can install them.
 
-## Unreleased
+## 0.4.0 — 2026-09-10
 
 ### Added
 
