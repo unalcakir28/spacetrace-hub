@@ -295,8 +295,16 @@ jobs:
               --title "Hub — continuous build (main)" \
               --notes-file notes.md
           else
+            # --latest=false: the download repository holds all three
+            # components, and `gh release create` otherwise makes whichever
+            # published most recently GitHub's "latest". That endpoint belongs
+            # to the CLI — `spacetrace update` and the agent in versions up to
+            # v0.4.0 read it, and a hub tag there parses as no version at all,
+            # so those installs go quiet and stay quiet. Measured on 9 Sept
+            # 2026, when hub-v0.3.0 took the slot.
             gh release create "$TAG" artifacts/* \
               --repo "$REPO" \
+              --latest=false \
               --title "spacetrace hub $VERSION" \
               --notes-file notes.md
           fi
