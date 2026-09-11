@@ -524,6 +524,7 @@ async fn a_threshold_rule_fires_and_is_recorded() {
         db::AlertKind::FreeBelowPercent,
         100.0,
         &hook,
+        None,
     )
     .unwrap();
 
@@ -578,6 +579,7 @@ async fn a_failed_webhook_is_recorded_as_failed_rather_than_lost() {
         db::AlertKind::FreeBelowPercent,
         100.0,
         "http://127.0.0.1:1/nope",
+        None,
     )
     .unwrap();
 
@@ -855,4 +857,305 @@ async fn a_destination_that_is_neither_url_nor_address_is_refused() {
         .unwrap();
     assert_eq!(response.status(), 200, "the error page, not a redirect");
     assert_eq!(db::list_rules(&hub.conn()).unwrap().len(), 0);
+}
+
+// ------------------------------------------------------------ people, roles
+
+/// Every route that changes something, as the test can reach it.
+///
+/// A list rather than a loop over the router, because axum does not expose its
+/// routes — which means this list is the thing that rots. It is checked
+/// against the source in `every_write_route_is_in_this_list` below, so adding
+/// a POST route without adding it here fails rather than quietly leaving a
+/// read-only account able to use it.
+const WRITE_ROUTES: [(&str, &[(&str, &str)]); 7] = [
+    (
+        "/alerts",
+        &[
+            ("host", ""),
+            ("root", ""),
+            ("kind", "free_below_percent"),
+            ("threshold", "10"),
+            ("destination", "https://example.com/hook"),
+        ],
+    ),
+    ("/alerts/delete", &[("id", "1")]),
+    ("/tokens", &[("name", "sneaky")]),
+    ("/tokens/revoke", &[("id", "1")]),
+    ("/people", &[("name", "sneaky"), ("role", "admin")]),
+    ("/people/revoke", &[("id", "1")]),
+    ("/settings/test", &[("to", "ops@example.com")]),
+];
+
+/// The point of the feature: somebody can be given the dashboard without being
+/// given the ability to change the fleet.
+#[tokio::test]
+async fn a_viewer_can_read_everything_and_change_nothing() {
+    let hub = start_hub(None).await;
+    let (_, viewer) = db::create_user(&hub.conn(), "reader", db::Role::Viewer).unwrap();
+
+    for page in ["/", "/alerts", "/tokens", "/people", "/settings"] {
+        let response = client()
+            .get(hub.url(page))
+            .bearer_auth(&viewer)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            200,
+            "a viewer must be able to read {page}"
+        );
+    }
+
+    for (route, form) in WRITE_ROUTES {
+        let response = client()
+            .post(hub.url(route))
+            .bearer_auth(&viewer)
+            .form(&form.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            403,
+            "a viewer must not be able to POST {route}"
+        );
+    }
+
+    // And nothing happened as a side effect of trying.
+    assert_eq!(db::list_rules(&hub.conn()).unwrap().len(), 0);
+    assert_eq!(db::list_tokens(&hub.conn()).unwrap().len(), 0);
+    assert_eq!(
+        db::list_users(&hub.conn()).unwrap().len(),
+        1,
+        "just the viewer"
+    );
+}
+
+/// The list above is only a safety net while it is complete. This reads the
+/// router in `src/web.rs` and fails when a `post(...)` route is not in it —
+/// the failure mode being a new write route that every read-only account can
+/// use, which no other test would notice.
+#[test]
+fn every_write_route_is_in_this_list() {
+    let source = include_str!("../src/web.rs");
+    let routes: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix(".route(\"")?;
+            let (path, rest) = rest.split_once('"')?;
+            // `get(x).post(y)` counts too: a mixed route with a write on it
+            // would sit in the read-only group.
+            rest.contains("post(").then(|| path.to_string())
+        })
+        .collect();
+
+    assert!(routes.len() > 3, "the router scan found almost nothing");
+    for path in routes {
+        // Signing in and out are not changes to the fleet.
+        if path == "/login" || path == "/logout" || path == "/snapshots" {
+            continue;
+        }
+        assert!(
+            WRITE_ROUTES.iter().any(|(known, _)| *known == path),
+            "{path} accepts POST but is not in WRITE_ROUTES — is it behind \
+             require_write, and is a viewer refused?"
+        );
+    }
+}
+
+/// The same routes, from an admin, have to actually work — otherwise the test
+/// above would pass on a hub where nobody can do anything.
+#[tokio::test]
+async fn an_admin_can_do_what_a_viewer_cannot() {
+    let hub = start_hub(None).await;
+    let (_, admin) = db::create_user(&hub.conn(), "owner", db::Role::Admin).unwrap();
+
+    let response = client()
+        .post(hub.url("/alerts"))
+        .bearer_auth(&admin)
+        .form(&[
+            ("host", ""),
+            ("root", ""),
+            ("kind", "free_below_percent"),
+            ("threshold", "10"),
+            ("destination", "https://example.com/hook"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+
+    let rules = db::list_rules(&hub.conn()).unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        rules[0].created_by.as_deref(),
+        Some("owner"),
+        "a rule has to carry who made it; that is the point of naming people"
+    );
+}
+
+/// The credential in the config file keeps working and keeps being an admin.
+/// It is the way back in, so a release that quietly demoted it would lock
+/// people out of their own hub.
+#[tokio::test]
+async fn the_configured_token_still_works_and_is_an_admin() {
+    let hub = start_hub(None).await;
+
+    let response = client()
+        .post(hub.url("/people"))
+        .bearer_auth(ADMIN)
+        .form(&[("name", "jane"), ("role", "viewer")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+    assert_eq!(db::list_users(&hub.conn()).unwrap().len(), 1);
+
+    // And its actions are attributable to something rather than to nobody.
+    client()
+        .post(hub.url("/alerts"))
+        .bearer_auth(ADMIN)
+        .form(&[
+            ("host", ""),
+            ("root", ""),
+            ("kind", "free_below_percent"),
+            ("threshold", "10"),
+            ("destination", "https://example.com/hook"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        db::list_rules(&hub.conn()).unwrap()[0]
+            .created_by
+            .as_deref(),
+        Some("config")
+    );
+}
+
+/// Taking access away has to actually take it away, on the next request.
+#[tokio::test]
+async fn a_revoked_person_is_locked_out() {
+    let hub = start_hub(None).await;
+    let (person, token) = db::create_user(&hub.conn(), "leaver", db::Role::Viewer).unwrap();
+
+    assert_eq!(
+        client()
+            .get(hub.url("/"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+
+    db::revoke_user(&hub.conn(), person.id).unwrap();
+
+    let after = client()
+        .get(hub.url("/"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), 401, "a revoked token must stop working");
+}
+
+/// Revoking the last admin would leave the dashboard changeable only by
+/// editing a file on the server — which is exactly the position somebody is
+/// not in when they have just locked themselves out of the web interface.
+#[tokio::test]
+async fn the_last_admin_cannot_revoke_themselves() {
+    let hub = start_hub(None).await;
+    let (only, token) = db::create_user(&hub.conn(), "solo", db::Role::Admin).unwrap();
+
+    let response = client()
+        .post(hub.url("/people/revoke"))
+        .bearer_auth(&token)
+        .form(&[("id", only.id.to_string())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "the refusal page, not a redirect");
+    assert!(!db::list_users(&hub.conn()).unwrap()[0].revoked);
+
+    // With a second admin there is a way back in, so it is allowed.
+    db::create_user(&hub.conn(), "backup", db::Role::Admin).unwrap();
+    let response = client()
+        .post(hub.url("/people/revoke"))
+        .bearer_auth(&token)
+        .form(&[("id", only.id.to_string())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+    assert!(
+        db::list_users(&hub.conn())
+            .unwrap()
+            .iter()
+            .find(|u| u.id == only.id)
+            .unwrap()
+            .revoked
+    );
+}
+
+/// A person's token has to work through the sign-in form as well as the
+/// Authorization header, or the only page that offers to take a token cannot
+/// take theirs.
+#[tokio::test]
+async fn a_person_can_sign_in_through_the_form() {
+    let hub = start_hub(None).await;
+    let (_, token) = db::create_user(&hub.conn(), "jane", db::Role::Viewer).unwrap();
+
+    let response = client()
+        .post(hub.url("/login"))
+        .form(&[("token", token.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 303);
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .expect("a session cookie")
+        .to_str()
+        .unwrap();
+    assert!(cookie.contains("HttpOnly"), "{cookie}");
+
+    let page = client()
+        .get(hub.url("/"))
+        .header("cookie", format!("st_hub={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200);
+}
+
+/// An agent token opens nothing on the dashboard, and a dashboard token
+/// pushes no snapshots. The separation predates roles and must survive them.
+#[tokio::test]
+async fn dashboard_tokens_and_agent_tokens_stay_separate() {
+    let hub = start_hub(None).await;
+    let (_, person) = db::create_user(&hub.conn(), "jane", db::Role::Admin).unwrap();
+    let agent = hub.new_agent_token("nas");
+
+    let as_agent = client()
+        .get(hub.url("/"))
+        .bearer_auth(&agent)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(as_agent.status(), 401, "an agent token is not a person");
+
+    let as_person = client()
+        .post(hub.url("/snapshots"))
+        .bearer_auth(&person)
+        .body(vec![0u8; 16])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(as_person.status(), 401, "a person is not an agent");
 }

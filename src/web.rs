@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Form, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Form, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -105,19 +105,40 @@ pub fn router(config: &Config, admin_token: String) -> Result<Router> {
             require_agent_token,
         ));
 
-    let dashboard = Router::new()
+    // Reading. Anyone signed in, whatever their role.
+    let reading = Router::new()
         .route("/", get(fleet_page))
         .route("/target", get(target_page))
-        .route("/alerts", get(alerts_page).post(create_alert))
-        .route("/alerts/delete", post(delete_alert))
-        .route("/tokens", get(tokens_page).post(create_agent_token))
+        .route("/alerts", get(alerts_page))
+        .route("/tokens", get(tokens_page))
+        .route("/people", get(people_page))
         .route("/settings", get(settings_page))
-        .route("/settings/test", post(send_test_mail))
-        .route("/tokens/revoke", post(revoke_agent_token))
-        .route("/logout", post(logout))
         .route("/about", get(about_page))
         .route("/api/fleet", get(api_fleet))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_admin));
+        // Signing out is not a change to the fleet; a viewer may do it.
+        .route("/logout", post(logout));
+
+    // Changing. **The split is the enforcement.** A check inside each handler
+    // is a thing to forget, and forgetting it here means a read-only account
+    // that can delete every alert rule in the fleet. Putting the routes in
+    // their own group makes the question "is this a write?" visible where the
+    // routes are listed, and gives the test below something it can enumerate.
+    let writing = Router::new()
+        .route("/alerts", post(create_alert))
+        .route("/alerts/delete", post(delete_alert))
+        .route("/tokens", post(create_agent_token))
+        .route("/tokens/revoke", post(revoke_agent_token))
+        .route("/people", post(create_person))
+        .route("/people/revoke", post(revoke_person))
+        .route("/settings/test", post(send_test_mail))
+        .route_layer(middleware::from_fn(require_write));
+
+    let dashboard = reading
+        .merge(writing)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_dashboard,
+        ));
 
     Ok(public.merge(ingest).merge(dashboard).with_state(state))
 }
@@ -193,9 +214,37 @@ pub fn cookie_value<'a>(header_value: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
-async fn require_admin(
+/// Who is making this request.
+///
+/// Put in the request's extensions by [`require_dashboard`] and read back by
+/// any handler that needs it, so the answer is resolved exactly once per
+/// request. A handler cannot forget to check, because a route that is not
+/// behind that layer never gets an `Identity` at all.
+#[derive(Debug, Clone)]
+pub struct Identity {
+    pub name: String,
+    pub role: db::Role,
+}
+
+impl Identity {
+    /// The credential from the hub's config file.
+    ///
+    /// It stays, and it stays an admin: it is the way back in when the last
+    /// person with access is gone, and it lives in a file on the server, which
+    /// is a meaningfully harder thing to reach than a browser. Named rather
+    /// than blank so an action taken with it is attributable to *something* —
+    /// "config" is a true and useful answer to "who added this rule".
+    fn from_config() -> Identity {
+        Identity {
+            name: "config".to_string(),
+            role: db::Role::Admin,
+        }
+    }
+}
+
+async fn require_dashboard(
     State(state): State<Arc<AppState>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let from_cookie = request
@@ -203,10 +252,24 @@ async fn require_admin(
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
         .and_then(|raw| cookie_value(raw, SESSION_COOKIE));
-    let presented = bearer(&request).or(from_cookie).unwrap_or("");
+    let presented = bearer(&request).or(from_cookie).unwrap_or("").to_string();
 
     if constant_time_eq(presented.as_bytes(), state.admin_token.as_bytes()) {
+        request.extensions_mut().insert(Identity::from_config());
         return next.run(request).await;
+    }
+
+    // A named person. Looked up second so the config token costs no query,
+    // and so a database that is briefly unavailable cannot lock out the
+    // credential that exists to get back in.
+    if let Ok(conn) = state.conn() {
+        if let Ok(Some(user)) = db::verify_user(&conn, &presented) {
+            request.extensions_mut().insert(Identity {
+                name: user.name,
+                role: user.role,
+            });
+            return next.run(request).await;
+        }
     }
 
     // A browser gets the sign-in page; an API client gets a status it can act
@@ -223,7 +286,51 @@ async fn require_admin(
         (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer")],
-            Json(serde_json::json!({ "error": "admin token required" })),
+            Json(serde_json::json!({ "error": "a dashboard token is required" })),
+        )
+            .into_response()
+    }
+}
+
+/// Refuse a change to anyone who is only allowed to look.
+///
+/// Runs *inside* [`require_dashboard`], so by the time it is reached an
+/// `Identity` is always present. Its absence would be a routing mistake rather
+/// than an anonymous request, and refusing is the safe reading of it either
+/// way.
+async fn require_write(request: Request, next: Next) -> Response {
+    let allowed = request
+        .extensions()
+        .get::<Identity>()
+        .is_some_and(|who| who.role.can_write());
+    if allowed {
+        return next.run(request).await;
+    }
+
+    let wants_html = request
+        .headers()
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"));
+
+    if wants_html {
+        (
+            StatusCode::FORBIDDEN,
+            Html(html::page(
+                "Read-only",
+                "",
+                r#"<div class="card" style="max-width:480px;margin:40px auto">
+<h1>Read-only</h1>
+<p class="lede">This account can see the fleet but not change it. An admin can
+change that on the People page, or issue you a new token.</p>
+<p><a href="/">Back to the fleet</a></p></div>"#,
+            )),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "this account is read-only" })),
         )
             .into_response()
     }
@@ -282,9 +389,10 @@ async fn login_page() -> Html<String> {
         "",
         r#"<div class="card" style="max-width:420px;margin:40px auto">
 <h1>Sign in</h1>
-<p class="lede">Paste the admin token from the hub's configuration.</p>
+<p class="lede">Paste your token. That is either your own, from the People
+page, or the one in the hub's configuration file.</p>
 <form method="post" action="/login">
-<label>Admin token<input type="password" name="token" autofocus autocomplete="current-password"></label>
+<label>Token<input type="password" name="token" autofocus autocomplete="current-password"></label>
 <button type="submit">Sign in</button>
 </form>
 <p class="hint" style="margin-top:14px">Agent tokens do not work here. They can
@@ -294,7 +402,19 @@ push snapshots and nothing else.</p>
 }
 
 async fn login_submit(State(state): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> Response {
-    if !constant_time_eq(form.token.trim().as_bytes(), state.admin_token.as_bytes()) {
+    let presented = form.token.trim();
+    // Either credential opens the dashboard, and the same two checks in the
+    // same order as the middleware — a form that accepted less than the
+    // middleware does would leave a person holding a working token unable to
+    // sign in through the only page that offers to take one.
+    let accepted = constant_time_eq(presented.as_bytes(), state.admin_token.as_bytes())
+        || state
+            .conn()
+            .ok()
+            .and_then(|conn| db::verify_user(&conn, presented).ok().flatten())
+            .is_some();
+
+    if !accepted {
         return Html(html::page(
             "Sign in",
             "",
@@ -302,7 +422,7 @@ async fn login_submit(State(state): State<Arc<AppState>>, Form(form): Form<Login
 <h1>Sign in</h1>
 <p class="lede" style="color:#fca5a5">That token was not accepted.</p>
 <form method="post" action="/login">
-<label>Admin token<input type="password" name="token" autofocus></label>
+<label>Token<input type="password" name="token" autofocus></label>
 <button type="submit">Sign in</button>
 </form></div>"#,
         ))
@@ -313,7 +433,7 @@ async fn login_submit(State(state): State<Arc<AppState>>, Form(form): Form<Login
     // cannot ride it. Add `Secure` by terminating TLS in front of the hub.
     let cookie = format!(
         "{SESSION_COOKIE}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000",
-        form.token.trim()
+        presented
     );
     (
         StatusCode::SEE_OTHER,
@@ -867,10 +987,10 @@ Leave host or root empty to match everything.</p>
     if rules.is_empty() {
         body.push_str("<div class=\"empty\">No rules yet.</div>");
     } else {
-        body.push_str("<table><thead><tr><th>Scope</th><th>Condition</th><th>Sends to</th><th>Added</th><th></th></tr></thead><tbody>");
+        body.push_str("<table><thead><tr><th>Scope</th><th>Condition</th><th>Sends to</th><th>Added</th><th>By</th><th></th></tr></thead><tbody>");
         for rule in &rules {
             body.push_str(&format!(
-                r#"<tr><td>{scope}</td><td>{condition}</td><td>{hook}</td><td>{added}</td>
+                r#"<tr><td>{scope}</td><td>{condition}</td><td>{hook}</td><td>{added}</td><td>{by}</td>
 <td class="r"><form method="post" action="/alerts/delete" style="display:inline">
 <input type="hidden" name="id" value="{id}">
 <button class="danger" type="submit">Delete</button></form></td></tr>"#,
@@ -882,6 +1002,9 @@ Leave host or root empty to match everything.</p>
                 condition = escape(&rule.kind.describe(rule.threshold)),
                 hook = escape(&truncate(&rule.destination.as_uri(), 44)),
                 added = escape(&html::relative(rule.created_at, now)),
+                // A dash, not a blank: a rule from before the hub had names is
+                // a known unknown, and an empty cell reads as a rendering bug.
+                by = escape(rule.created_by.as_deref().unwrap_or("—")),
                 id = rule.id,
             ));
         }
@@ -923,7 +1046,11 @@ struct AlertForm {
     destination: String,
 }
 
-async fn create_alert(State(state): State<Arc<AppState>>, Form(form): Form<AlertForm>) -> Response {
+async fn create_alert(
+    State(state): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+    Form(form): Form<AlertForm>,
+) -> Response {
     let Some(kind) = AlertKind::parse(&form.kind) else {
         return error_page("Alerts", "That is not a condition this hub understands.");
     };
@@ -938,6 +1065,7 @@ async fn create_alert(State(state): State<Arc<AppState>>, Form(form): Form<Alert
         kind,
         form.threshold,
         &form.destination,
+        Some(who.name.as_str()),
     ) {
         Ok(_) => Redirect::to("/alerts").into_response(),
         Err(err) => error_page("Alerts", &format!("{err:#}")),
@@ -1083,6 +1211,167 @@ async fn send_test_mail(
     };
 
     Redirect::to(&format!("/settings?ok={ok}&sent={}", urlencode(&detail))).into_response()
+}
+
+// -------------------------------------------------------------------- people
+
+#[derive(Deserialize)]
+struct PersonQuery {
+    /// Set once, right after creating someone, so the token can be shown
+    /// exactly once — the same pattern as an agent token, for the same reason:
+    /// it is not stored in the clear and cannot be shown again.
+    #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+async fn people_page(
+    State(state): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+    Query(query): Query<PersonQuery>,
+) -> Response {
+    let conn = match state.conn() {
+        Ok(conn) => conn,
+        Err(err) => return error_page("People", &format!("{err:#}")),
+    };
+    let people = db::list_users(&conn).unwrap_or_default();
+    let now = db::now_unix();
+
+    let mut body = format!(
+        r#"<h1>People</h1><p class="lede">One token per person, so an action has
+a name against it and access can be taken away from one person without changing
+anyone else's. You are signed in as <strong>{me}</strong> ({role}).</p>"#,
+        me = escape(&who.name),
+        role = who.role.as_str(),
+    );
+
+    if let Some(token) = query.created.as_deref() {
+        body.push_str(&format!(
+            r#"<div class="card"><h2 style="margin-top:0">Token for {name}</h2>
+<p class="lede">Copy it now. It is stored only as a hash, so this is the only
+time it can be shown.</p>
+<pre class="token">{token}</pre></div>"#,
+            name = escape(query.name.as_deref().unwrap_or("the new person")),
+            token = escape(token),
+        ));
+    }
+
+    if who.role.can_write() {
+        body.push_str(
+            r#"<div class="card"><h2 style="margin-top:0">Add someone</h2>
+<form method="post" action="/people">
+<div class="row">
+<label>Name <input name="name" placeholder="jane" required></label>
+<label>Role <select name="role">
+<option value="viewer">viewer — can look at everything</option>
+<option value="admin">admin — can change everything, including this page</option>
+</select></label>
+</div>
+<button type="submit">Create token</button>
+</form></div>"#,
+        );
+    }
+
+    if people.is_empty() {
+        body.push_str(
+            r#"<div class="empty">Nobody yet. The token in the hub's config file
+is still the way in, and it counts as an admin.</div>"#,
+        );
+    } else {
+        body.push_str("<table><thead><tr><th>Name</th><th>Role</th><th>Added</th><th>Last seen</th><th></th></tr></thead><tbody>");
+        for person in &people {
+            let last_seen = match person.last_seen_at {
+                // The question this answers is "can I revoke this safely", so
+                // "never" has to be said rather than left blank.
+                None => "never".to_string(),
+                Some(at) => html::relative(at, now),
+            };
+            let action = match (person.revoked, who.role.can_write()) {
+                (true, _) => "<span class=\"tag bad\">revoked</span>".to_string(),
+                (false, false) => String::new(),
+                (false, true) => format!(
+                    r#"<form method="post" action="/people/revoke" style="display:inline">
+<input type="hidden" name="id" value="{id}">
+<button class="danger" type="submit">Revoke</button></form>"#,
+                    id = person.id
+                ),
+            };
+            body.push_str(&format!(
+                r#"<tr><td>{name}</td><td>{role}</td><td>{added}</td><td>{seen}</td>
+<td class="r">{action}</td></tr>"#,
+                name = escape(&person.name),
+                role = person.role.as_str(),
+                added = escape(&html::relative(person.created_at, now)),
+                seen = escape(&last_seen),
+                action = action,
+            ));
+        }
+        body.push_str("</tbody></table>");
+    }
+
+    Html(html::page("People", "/people", &body)).into_response()
+}
+
+#[derive(Deserialize)]
+struct PersonForm {
+    name: String,
+    role: String,
+}
+
+async fn create_person(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<PersonForm>,
+) -> Response {
+    let Some(role) = db::Role::parse(&form.role) else {
+        return error_page("People", "That is not a role this hub understands.");
+    };
+    let conn = match state.conn() {
+        Ok(conn) => conn,
+        Err(err) => return error_page("People", &format!("{err:#}")),
+    };
+    match db::create_user(&conn, &form.name, role) {
+        Ok((person, token)) => Redirect::to(&format!(
+            "/people?created={}&name={}",
+            urlencode(&token),
+            urlencode(&person.name)
+        ))
+        .into_response(),
+        Err(err) => error_page("People", &format!("{err:#}")),
+    }
+}
+
+async fn revoke_person(
+    State(state): State<Arc<AppState>>,
+    Extension(who): Extension<Identity>,
+    Form(form): Form<IdForm>,
+) -> Response {
+    let conn = match state.conn() {
+        Ok(conn) => conn,
+        Err(err) => return error_page("People", &format!("{err:#}")),
+    };
+
+    // Revoking the last admin would leave the fleet changeable only from a
+    // file on the server, by someone who can reach that server. That is the
+    // way back in, not a workflow, so the last one is refused here rather than
+    // left as a lesson.
+    let target_is_admin = db::list_users(&conn)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|u| u.id == form.id)
+        .is_some_and(|u| u.role == db::Role::Admin && !u.revoked);
+    if target_is_admin && db::active_admin_count(&conn).unwrap_or(0) <= 1 {
+        return error_page(
+            "People",
+            "That is the last admin. Make someone else an admin first, or the \
+             dashboard could only be changed by editing the hub's config file \
+             on the server.",
+        );
+    }
+
+    let _ = who;
+    let _ = db::revoke_user(&conn, form.id);
+    Redirect::to("/people").into_response()
 }
 
 // ------------------------------------------------------------------ tokens

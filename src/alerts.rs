@@ -219,6 +219,7 @@ mod tests {
             destination: Destination::Webhook("https://example.com/hook".into()),
             enabled: true,
             created_at: 0,
+            created_by: None,
         }
     }
 
@@ -385,6 +386,7 @@ mod tests {
             AlertKind::FullWithinDays,
             7.0,
             "https://example.com/hook",
+            None,
         )
         .unwrap();
 
@@ -415,6 +417,7 @@ mod tests {
             AlertKind::FreeBelowPercent,
             50.0,
             "https://e/h",
+            None,
         )
         .unwrap();
 
@@ -440,6 +443,7 @@ mod tests {
             AlertKind::FreeBelowPercent,
             99.0,
             "https://e/h",
+            None,
         )
         .unwrap();
         let targets = vec![growing(Some(GIB))];
@@ -456,6 +460,7 @@ mod tests {
             AlertKind::FreeBelowPercent,
             99.0,
             "https://e/a",
+            None,
         )
         .unwrap();
         db::create_rule(
@@ -465,6 +470,7 @@ mod tests {
             AlertKind::FullWithinDays,
             30.0,
             "https://e/b",
+            None,
         )
         .unwrap();
 

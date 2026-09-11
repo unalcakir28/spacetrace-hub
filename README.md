@@ -46,8 +46,14 @@ the file you back up and the one that ends up attached to a bug report. The
 Settings page shows what is configured and sends a test message through the
 same path a real alert takes.
 
-Not done yet: multi-user accounts — there is one admin credential rather than
-per-person logins.
+Per-person access with two roles: a **viewer** sees the whole fleet and can
+change none of it, an **admin** can change anything including who else has
+access. Tokens rather than passwords, deliberately — a generated 256-bit token
+can be stored as a plain SHA-256 because there is nothing to brute-force, where
+a human-chosen password could not be. Alert rules record who added them, and
+the last admin cannot revoke themselves.
+
+Nothing is left to do here that the hub was missing.
 
 ## Run it
 
@@ -146,7 +152,7 @@ src/
 ├── trend.rs    least-squares growth and the forecast, with its own limits
 ├── alerts.rs   threshold evaluation, cooldown, delivery
 ├── email.rs    SMTP, and why that one is a dependency
-├── web.rs      routes, the two auth layers, the pages
+├── web.rs      routes, the three auth layers, the pages
 └── html.rs     escaping, formatting, the shared stylesheet
 ```
 

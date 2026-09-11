@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 /// Bumped when these tables change in a way an older binary cannot read.
 /// Kept separate from the snapshot schema's version, which the store owns.
-const HUB_SCHEMA_VERSION: i64 = 2;
+const HUB_SCHEMA_VERSION: i64 = 3;
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     // On a fresh database `hub_meta` does not exist yet and the query fails;
@@ -43,6 +43,14 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE alert_rules RENAME COLUMN webhook_url TO destination;")?;
     }
 
+    if found > 0 && found < 3 {
+        // Who made a rule. Nullable, and NULL means "before anyone had a
+        // name" — the hub had one shared credential until v3, so there is no
+        // honest value to backfill and inventing one would put a person's
+        // name on something they did not do.
+        conn.execute_batch("ALTER TABLE alert_rules ADD COLUMN created_by TEXT;")?;
+    }
+
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS hub_meta (
@@ -61,6 +69,24 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             revoked      INTEGER NOT NULL DEFAULT 0
         );
 
+        -- People who can open the dashboard.
+        --
+        -- Tokens, not passwords, and that is a deliberate limit rather than a
+        -- shortcut. A generated 256-bit token can be stored as a plain SHA-256
+        -- because there is nothing to brute-force; a human-chosen password
+        -- could not, and would need a slow KDF and everything around it. The
+        -- sign-in form already takes a token, so this adds names and roles to
+        -- a mechanism that was already here and already correct.
+        CREATE TABLE IF NOT EXISTS dashboard_users (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            name         TEXT    NOT NULL,
+            token_sha256 TEXT    NOT NULL UNIQUE,
+            role         TEXT    NOT NULL,
+            created_at   INTEGER NOT NULL,
+            last_seen_at INTEGER,
+            revoked      INTEGER NOT NULL DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS alert_rules (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             -- NULL matches any host / any root.
@@ -73,7 +99,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             -- of the data instead of a rule someone has to remember to check.
             destination TEXT    NOT NULL,
             enabled     INTEGER NOT NULL DEFAULT 1,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            -- The name of whoever added it, or NULL for a rule made before
+            -- the hub knew who anyone was.
+            created_by  TEXT
         );
 
         -- What actually fired, so a rule cannot spam and so there is a record
@@ -225,6 +254,169 @@ pub fn revoke_token(conn: &Connection, id: i64) -> Result<bool> {
     Ok(n > 0)
 }
 
+// ------------------------------------------------------------------- people
+
+/// What someone signed in to the dashboard is allowed to do.
+///
+/// Two levels, not a permission matrix. The hub does four things a person can
+/// change — add and remove alert rules, issue and revoke agent tokens, manage
+/// other people, and send a test mail — and every one of them is the same kind
+/// of act: it changes what the fleet does. Splitting them finer would be
+/// inventing distinctions nobody has asked for, and a role nobody understands
+/// gets handed out as Admin anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Can read every page and change nothing.
+    Viewer,
+    /// Can change anything, including who else has access.
+    Admin,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Admin => "admin",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Role> {
+        match text {
+            "viewer" => Some(Role::Viewer),
+            "admin" => Some(Role::Admin),
+            _ => None,
+        }
+    }
+
+    pub fn can_write(self) -> bool {
+        self == Role::Admin
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardUser {
+    pub id: i64,
+    pub name: String,
+    pub role: Role,
+    pub created_at: i64,
+    pub last_seen_at: Option<i64>,
+    pub revoked: bool,
+}
+
+/// Add a person. The token is returned once and never stored in the clear.
+pub fn create_user(conn: &Connection, name: &str, role: Role) -> Result<(DashboardUser, String)> {
+    let name = name.trim();
+    anyhow::ensure!(!name.is_empty(), "a person needs a name");
+    let plaintext = generate_token()?;
+    let now = now_unix();
+    conn.execute(
+        "INSERT INTO dashboard_users (name, token_sha256, role, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![name, hash_token(&plaintext), role.as_str(), now],
+    )?;
+    Ok((
+        DashboardUser {
+            id: conn.last_insert_rowid(),
+            name: name.to_string(),
+            role,
+            created_at: now,
+            last_seen_at: None,
+            revoked: false,
+        },
+        plaintext,
+    ))
+}
+
+/// Look up a presented dashboard token. `None` for unknown or revoked.
+///
+/// Touches `last_seen_at`, which is the only way to answer "is this credential
+/// still in use" before revoking it — the question anyone asks when someone
+/// leaves.
+pub fn verify_user(conn: &Connection, presented: &str) -> Result<Option<DashboardUser>> {
+    let presented = presented.trim();
+    if presented.is_empty() {
+        return Ok(None);
+    }
+    let found = conn
+        .query_row(
+            "SELECT id, name, role, created_at, last_seen_at, revoked
+             FROM dashboard_users WHERE token_sha256 = ?1",
+            [&hash_token(presented)],
+            |row| {
+                let role: String = row.get(2)?;
+                Ok(DashboardUser {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    // An unreadable role is the least privileged one, not an
+                    // error: a row written by a newer build must not be able
+                    // to fail *open*.
+                    role: Role::parse(&role).unwrap_or(Role::Viewer),
+                    created_at: row.get(3)?,
+                    last_seen_at: row.get(4)?,
+                    revoked: row.get::<_, i64>(5)? != 0,
+                })
+            },
+        )
+        .optional()?;
+
+    match found {
+        Some(user) if !user.revoked => {
+            conn.execute(
+                "UPDATE dashboard_users SET last_seen_at = ?1 WHERE id = ?2",
+                params![now_unix(), user.id],
+            )?;
+            Ok(Some(user))
+        }
+        _ => Ok(None),
+    }
+}
+
+pub fn list_users(conn: &Connection) -> Result<Vec<DashboardUser>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, role, created_at, last_seen_at, revoked
+         FROM dashboard_users ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let role: String = row.get(2)?;
+        Ok(DashboardUser {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            role: Role::parse(&role).unwrap_or(Role::Viewer),
+            created_at: row.get(3)?,
+            last_seen_at: row.get(4)?,
+            revoked: row.get::<_, i64>(5)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Take someone's access away.
+///
+/// Revoked rather than deleted, for the same reason agent tokens are: the row
+/// is the record that this person had access, and the alert rules carrying
+/// their name would otherwise point at somebody who, as far as the database is
+/// concerned, never existed.
+pub fn revoke_user(conn: &Connection, id: i64) -> Result<bool> {
+    let n = conn.execute("UPDATE dashboard_users SET revoked = 1 WHERE id = ?1", [id])?;
+    Ok(n > 0)
+}
+
+/// How many people can still change things.
+///
+/// Asked before revoking, so the last admin cannot lock everyone out. The
+/// configured token in the hub's config file is a way back in, but it is in a
+/// file on a server someone has to reach — which is exactly the position a
+/// person is not in when they have just locked themselves out of the web
+/// interface.
+pub fn active_admin_count(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM dashboard_users WHERE role = 'admin' AND revoked = 0",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 // ------------------------------------------------------------------ alerts
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +474,8 @@ pub struct AlertRule {
     pub destination: Destination,
     pub enabled: bool,
     pub created_at: i64,
+    /// Who added it, or `None` for a rule made before the hub had names.
+    pub created_by: Option<String>,
 }
 
 /// Where a firing goes.
@@ -363,6 +557,7 @@ pub fn create_rule(
     kind: AlertKind,
     threshold: f64,
     destination: &str,
+    created_by: Option<&str>,
 ) -> Result<i64> {
     let destination = Destination::parse(destination)?;
     anyhow::ensure!(
@@ -370,15 +565,16 @@ pub fn create_rule(
         "the threshold must be a non-negative number"
     );
     conn.execute(
-        "INSERT INTO alert_rules (host, root, kind, threshold, destination, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO alert_rules (host, root, kind, threshold, destination, created_at, created_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             host.map(str::trim).filter(|s| !s.is_empty()),
             root.map(str::trim).filter(|s| !s.is_empty()),
             kind.as_str(),
             threshold,
             destination.as_uri(),
-            now_unix()
+            now_unix(),
+            created_by
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -386,7 +582,7 @@ pub fn create_rule(
 
 pub fn list_rules(conn: &Connection) -> Result<Vec<AlertRule>> {
     let mut stmt = conn.prepare(
-        "SELECT id, host, root, kind, threshold, destination, enabled, created_at
+        "SELECT id, host, root, kind, threshold, destination, enabled, created_at, created_by
          FROM alert_rules ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -403,6 +599,7 @@ pub fn list_rules(conn: &Connection) -> Result<Vec<AlertRule>> {
             destination: Destination::from_stored(&row.get::<_, String>(5)?),
             enabled: row.get::<_, i64>(6)? != 0,
             created_at: row.get(7)?,
+            created_by: row.get(8)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -617,6 +814,7 @@ mod tests {
             AlertKind::FreeBelowPercent,
             10.0,
             "https://example.com/hook",
+            None,
         )
         .unwrap();
         create_rule(
@@ -626,6 +824,7 @@ mod tests {
             AlertKind::FullWithinDays,
             7.0,
             "https://example.com/any",
+            None,
         )
         .unwrap();
         create_rule(
@@ -635,6 +834,7 @@ mod tests {
             AlertKind::GrowthAbovePerDay,
             1e9,
             "https://example.com/web",
+            None,
         )
         .unwrap();
 
@@ -660,7 +860,8 @@ mod tests {
             None,
             AlertKind::FreeBelowPercent,
             10.0,
-            "not-a-url"
+            "not-a-url",
+            None
         )
         .is_err());
         assert!(create_rule(
@@ -669,7 +870,8 @@ mod tests {
             None,
             AlertKind::FreeBelowPercent,
             10.0,
-            "ftp://x/y"
+            "ftp://x/y",
+            None
         )
         .is_err());
         assert!(create_rule(
@@ -678,7 +880,8 @@ mod tests {
             None,
             AlertKind::FreeBelowPercent,
             -1.0,
-            "https://x/y"
+            "https://x/y",
+            None
         )
         .is_err());
         assert!(create_rule(
@@ -687,7 +890,8 @@ mod tests {
             None,
             AlertKind::FreeBelowPercent,
             f64::NAN,
-            "https://x/y"
+            "https://x/y",
+            None
         )
         .is_err());
     }
@@ -702,6 +906,7 @@ mod tests {
             AlertKind::FreeBelowPercent,
             5.0,
             "https://x/y",
+            None,
         )
         .unwrap();
         let rule = &list_rules(&conn).unwrap()[0];
@@ -720,6 +925,7 @@ mod tests {
             AlertKind::FreeBelowPercent,
             5.0,
             "https://x/y",
+            None,
         )
         .unwrap();
         record_event(&conn, id, "nas", "/var", now_unix(), "test").unwrap();
@@ -743,6 +949,7 @@ mod tests {
             AlertKind::FullWithinDays,
             7.0,
             "https://x/y",
+            None,
         )
         .unwrap();
         assert!(last_fired(&conn, rule, "nas", "/var").unwrap().is_none());
@@ -879,6 +1086,7 @@ mod tests {
             AlertKind::FreeBelowPercent,
             5.0,
             "ops@example.com",
+            None,
         )
         .expect("a v2 write must work after migrating");
         assert_eq!(list_rules(&conn).unwrap().len(), 2);
@@ -897,6 +1105,7 @@ mod tests {
             AlertKind::FreeBelowPercent,
             5.0,
             "ops@example.com",
+            None,
         )
         .unwrap();
         migrate(&conn).expect("a second migration must be a no-op");
