@@ -4,6 +4,7 @@
 pub mod alerts;
 pub mod config;
 pub mod db;
+pub mod email;
 pub mod fleet;
 pub mod html;
 pub mod trend;

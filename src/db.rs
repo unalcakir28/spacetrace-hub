@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 /// Bumped when these tables change in a way an older binary cannot read.
 /// Kept separate from the snapshot schema's version, which the store owns.
-const HUB_SCHEMA_VERSION: i64 = 1;
+const HUB_SCHEMA_VERSION: i64 = 2;
 
 pub fn migrate(conn: &Connection) -> Result<()> {
     // On a fresh database `hub_meta` does not exist yet and the query fails;
@@ -29,6 +29,19 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         "this database was written by a newer spacetrace-hub (hub schema v{found}, \
          this build understands v{HUB_SCHEMA_VERSION})"
     );
+
+    // Before the creates, not after: on a v1 database the `CREATE TABLE IF NOT
+    // EXISTS` below is a no-op, so the new column can only arrive by renaming
+    // the old one. On a fresh database `found` is 0 and there is nothing to
+    // rename.
+    if found == 1 {
+        // A rule's destination was always a webhook URL; now it is a URL whose
+        // scheme says how to deliver, and an existing http(s) row is already
+        // in that form. So this is a rename and not a conversion — which is
+        // the reason the scheme was reused rather than a second nullable
+        // column added beside it.
+        conn.execute_batch("ALTER TABLE alert_rules RENAME COLUMN webhook_url TO destination;")?;
+    }
 
     conn.execute_batch(
         r#"
@@ -55,7 +68,10 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             root        TEXT,
             kind        TEXT    NOT NULL,
             threshold   REAL    NOT NULL,
-            webhook_url TEXT    NOT NULL,
+            -- Either an http(s) URL or a mailto: address. One column rather
+            -- than a nullable pair, so "exactly one destination" is the shape
+            -- of the data instead of a rule someone has to remember to check.
+            destination TEXT    NOT NULL,
             enabled     INTEGER NOT NULL DEFAULT 1,
             created_at  INTEGER NOT NULL
         );
@@ -263,9 +279,73 @@ pub struct AlertRule {
     pub root: Option<String>,
     pub kind: AlertKind,
     pub threshold: f64,
-    pub webhook_url: String,
+    pub destination: Destination,
     pub enabled: bool,
     pub created_at: i64,
+}
+
+/// Where a firing goes.
+///
+/// Stored as a URI so the column says which transport it means. `mailto:` is
+/// the real scheme for this and reusing it means existing webhook rows needed
+/// no conversion when email was added — they were already valid values of the
+/// wider type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "lowercase")]
+pub enum Destination {
+    Webhook(String),
+    Email(String),
+}
+
+impl Destination {
+    /// Parse what a person typed into the destination field.
+    ///
+    /// A bare address is accepted as email, because that is what someone types
+    /// when they mean email and refusing it in favour of `mailto:` would be
+    /// pedantry aimed at the one person who reads the label.
+    pub fn parse(raw: &str) -> Result<Destination> {
+        let text = raw.trim();
+        anyhow::ensure!(!text.is_empty(), "a destination is required");
+        if let Some(address) = text.strip_prefix("mailto:") {
+            return Destination::email(address);
+        }
+        if text.starts_with("http://") || text.starts_with("https://") {
+            return Ok(Destination::Webhook(text.to_string()));
+        }
+        if text.contains('@') {
+            return Destination::email(text);
+        }
+        anyhow::bail!("a destination is either an http(s) URL or an email address")
+    }
+
+    fn email(address: &str) -> Result<Destination> {
+        let address = address.trim();
+        // The address is checked here rather than at send time so a typo is
+        // refused by the form, in front of the person who can fix it, instead
+        // of becoming a delivery failure in a log at three in the morning.
+        anyhow::ensure!(
+            address.parse::<lettre::message::Mailbox>().is_ok(),
+            "{address} is not an email address"
+        );
+        Ok(Destination::Email(address.to_string()))
+    }
+
+    /// How it is stored, and what the dashboard shows.
+    pub fn as_uri(&self) -> String {
+        match self {
+            Destination::Webhook(url) => url.clone(),
+            Destination::Email(address) => format!("mailto:{address}"),
+        }
+    }
+
+    /// Read a stored value back.
+    ///
+    /// Anything unrecognised is read as a webhook rather than rejected: a row
+    /// written by a newer build must not make the whole rule list unreadable,
+    /// and a delivery that fails is recorded where someone can see it.
+    pub fn from_stored(raw: &str) -> Destination {
+        Destination::parse(raw).unwrap_or_else(|_| Destination::Webhook(raw.to_string()))
+    }
 }
 
 impl AlertRule {
@@ -282,25 +362,22 @@ pub fn create_rule(
     root: Option<&str>,
     kind: AlertKind,
     threshold: f64,
-    webhook_url: &str,
+    destination: &str,
 ) -> Result<i64> {
-    anyhow::ensure!(
-        webhook_url.starts_with("http://") || webhook_url.starts_with("https://"),
-        "the webhook URL must be http or https"
-    );
+    let destination = Destination::parse(destination)?;
     anyhow::ensure!(
         threshold.is_finite() && threshold >= 0.0,
         "the threshold must be a non-negative number"
     );
     conn.execute(
-        "INSERT INTO alert_rules (host, root, kind, threshold, webhook_url, created_at)
+        "INSERT INTO alert_rules (host, root, kind, threshold, destination, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             host.map(str::trim).filter(|s| !s.is_empty()),
             root.map(str::trim).filter(|s| !s.is_empty()),
             kind.as_str(),
             threshold,
-            webhook_url.trim(),
+            destination.as_uri(),
             now_unix()
         ],
     )?;
@@ -309,7 +386,7 @@ pub fn create_rule(
 
 pub fn list_rules(conn: &Connection) -> Result<Vec<AlertRule>> {
     let mut stmt = conn.prepare(
-        "SELECT id, host, root, kind, threshold, webhook_url, enabled, created_at
+        "SELECT id, host, root, kind, threshold, destination, enabled, created_at
          FROM alert_rules ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -323,7 +400,7 @@ pub fn list_rules(conn: &Connection) -> Result<Vec<AlertRule>> {
             // whole listing.
             kind: AlertKind::parse(&kind_text).unwrap_or(AlertKind::FreeBelowPercent),
             threshold: row.get(4)?,
-            webhook_url: row.get(5)?,
+            destination: Destination::from_stored(&row.get::<_, String>(5)?),
             enabled: row.get::<_, i64>(6)? != 0,
             created_at: row.get(7)?,
         })
@@ -701,5 +778,128 @@ mod tests {
             assert!(!kind.describe(10.0).is_empty());
         }
         assert!(AlertKind::parse("something_new").is_none());
+    }
+
+    // --------------------------------------------------- destinations
+
+    #[test]
+    fn a_url_is_a_webhook_and_an_address_is_email() {
+        assert_eq!(
+            Destination::parse("https://hooks.example.com/x").unwrap(),
+            Destination::Webhook("https://hooks.example.com/x".into())
+        );
+        assert_eq!(
+            Destination::parse("ops@example.com").unwrap(),
+            Destination::Email("ops@example.com".into())
+        );
+        assert_eq!(
+            Destination::parse("mailto:ops@example.com").unwrap(),
+            Destination::Email("ops@example.com".into()),
+            "the scheme is how it is stored, so it must also be accepted"
+        );
+    }
+
+    /// The stored form has to survive a round trip unchanged, because that is
+    /// what makes a v1 row valid without conversion.
+    #[test]
+    fn a_destination_round_trips_through_its_stored_form() {
+        for raw in ["https://example.com/hook", "http://10.0.0.5/x", "ops@x.io"] {
+            let parsed = Destination::parse(raw).unwrap();
+            assert_eq!(Destination::from_stored(&parsed.as_uri()), parsed, "{raw}");
+        }
+    }
+
+    /// A typo must be caught by the form, in front of the person who can fix
+    /// it, rather than becoming a delivery failure at three in the morning.
+    #[test]
+    fn something_that_is_neither_is_refused() {
+        for raw in ["", "  ", "example.com", "ftp://example.com", "ops@"] {
+            assert!(
+                Destination::parse(raw).is_err(),
+                "{raw:?} should not be a destination"
+            );
+        }
+    }
+
+    /// A row written by a newer build must not make the whole rule list
+    /// unreadable. One rule that cannot be delivered beats no dashboard.
+    #[test]
+    fn an_unreadable_stored_destination_is_not_fatal() {
+        assert_eq!(
+            Destination::from_stored("carrier-pigeon://roof"),
+            Destination::Webhook("carrier-pigeon://roof".into())
+        );
+    }
+
+    /// The v1 → v2 migration, on a database that really was written by v1.
+    ///
+    /// Built by hand rather than by an old binary, but built as v1 wrote it:
+    /// the column name, and a row in it. The failure this catches is a hub
+    /// that starts against an existing database and cannot read a single one
+    /// of its alert rules.
+    #[test]
+    fn a_v1_database_keeps_its_rules_through_the_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE hub_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+            INSERT INTO hub_meta (key, value) VALUES ('schema', 1);
+            CREATE TABLE alert_rules (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                host        TEXT,
+                root        TEXT,
+                kind        TEXT    NOT NULL,
+                threshold   REAL    NOT NULL,
+                webhook_url TEXT    NOT NULL,
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                created_at  INTEGER NOT NULL
+            );
+            INSERT INTO alert_rules (host, root, kind, threshold, webhook_url, created_at)
+            VALUES ('nas', '/var', 'free_below_percent', 10.0,
+                    'https://hooks.example.com/old', 1000);
+            "#,
+        )
+        .unwrap();
+
+        migrate(&conn).expect("a v1 database must migrate");
+
+        let rules = list_rules(&conn).unwrap();
+        assert_eq!(rules.len(), 1, "the existing rule must survive");
+        assert_eq!(
+            rules[0].destination,
+            Destination::Webhook("https://hooks.example.com/old".into()),
+            "an existing webhook row is already a valid destination"
+        );
+
+        // And the migrated database must still be writable as v2.
+        create_rule(
+            &conn,
+            None,
+            None,
+            AlertKind::FreeBelowPercent,
+            5.0,
+            "ops@example.com",
+        )
+        .expect("a v2 write must work after migrating");
+        assert_eq!(list_rules(&conn).unwrap().len(), 2);
+    }
+
+    /// Migrating twice must be a no-op, because the hub runs this on every
+    /// start and the rename would fail the second time.
+    #[test]
+    fn migrating_a_v2_database_again_changes_nothing() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        create_rule(
+            &conn,
+            None,
+            None,
+            AlertKind::FreeBelowPercent,
+            5.0,
+            "ops@example.com",
+        )
+        .unwrap();
+        migrate(&conn).expect("a second migration must be a no-op");
+        assert_eq!(list_rules(&conn).unwrap().len(), 1);
     }
 }

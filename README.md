@@ -37,12 +37,17 @@ Phase 4 of the roadmap. Working:
   snapshots showing which folder actually grew
 - Growth rate and a "fills in N days" forecast, **withheld** when the history is
   too short, too noisy, or when the filesystem's capacity was never recorded
-- Threshold rules with webhook delivery: free space below a percentage, growth
-  above a rate, or a forecast inside a horizon
+- Threshold rules delivered by webhook **or email**: free space below a
+  percentage, growth above a rate, or a forecast inside a horizon
 - Per-agent tokens, stored hashed, revocable
 
-Not done yet: email delivery for alerts (webhooks only), and multi-user accounts
-— there is one admin credential rather than per-person logins.
+Mail credentials live in the config file, not in the database — the database is
+the file you back up and the one that ends up attached to a bug report. The
+Settings page shows what is configured and sends a test message through the
+same path a real alert takes.
+
+Not done yet: multi-user accounts — there is one admin credential rather than
+per-person logins.
 
 ## Run it
 
@@ -139,7 +144,8 @@ src/
 ├── db.rs       agent tokens, alert rules, alert events
 ├── fleet.rs    (host, root) targets, urgency ordering, summary
 ├── trend.rs    least-squares growth and the forecast, with its own limits
-├── alerts.rs   threshold evaluation, cooldown, webhook delivery
+├── alerts.rs   threshold evaluation, cooldown, delivery
+├── email.rs    SMTP, and why that one is a dependency
 ├── web.rs      routes, the two auth layers, the pages
 └── html.rs     escaping, formatting, the shared stylesheet
 ```

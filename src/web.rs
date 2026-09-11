@@ -39,6 +39,13 @@ pub struct AppState {
     max_upload_bytes: usize,
     keep_per_target: Option<usize>,
     client: reqwest::Client,
+    /// Built once at startup, or `None` when no `[smtp]` section was given.
+    ///
+    /// Built eagerly so a bad relay address stops the hub where someone is
+    /// watching it start, rather than at the first alert. `None` is a working
+    /// state, not a failure: a hub with only webhook rules needs no mail
+    /// configuration at all, and the settings page says which one this is.
+    mailer: Option<Arc<crate::email::Mailer>>,
     started: Instant,
 }
 
@@ -75,6 +82,12 @@ pub fn router(config: &Config, admin_token: String) -> Result<Router> {
         client: reqwest::Client::builder()
             .build()
             .context("building the HTTP client")?,
+        mailer: match &config.smtp {
+            Some(smtp) => Some(Arc::new(
+                crate::email::Mailer::build(smtp).context("configuring [smtp]")?,
+            )),
+            None => None,
+        },
         started: Instant::now(),
     });
 
@@ -98,6 +111,8 @@ pub fn router(config: &Config, admin_token: String) -> Result<Router> {
         .route("/alerts", get(alerts_page).post(create_alert))
         .route("/alerts/delete", post(delete_alert))
         .route("/tokens", get(tokens_page).post(create_agent_token))
+        .route("/settings", get(settings_page))
+        .route("/settings/test", post(send_test_mail))
         .route("/tokens/revoke", post(revoke_agent_token))
         .route("/logout", post(logout))
         .route("/about", get(about_page))
@@ -446,7 +461,7 @@ async fn evaluate_alerts(state: &AppState) -> usize {
     let mut delivered = 0;
     for (event_id, firing) in firings {
         eprintln!("alert: {}", firing.message);
-        match alerts::deliver(&state.client, &firing).await {
+        match alerts::deliver(&state.client, state.mailer.as_deref(), &firing).await {
             Ok(detail) => {
                 delivered += 1;
                 let _ = db::mark_delivered(&conn, event_id, Some(&detail));
@@ -807,7 +822,23 @@ async fn alerts_page(State(state): State<Arc<AppState>>) -> Response {
     let events = db::recent_events(&conn, 40).unwrap_or_default();
     let now = db::now_unix();
 
-    let mut body = String::from(
+    // Said here rather than only on the settings page: the moment someone is
+    // about to type an address is the moment it matters that mail is not
+    // configured, and a rule accepted now would fail silently tonight.
+    let mail_note = match &state.mailer {
+        Some(mailer) => format!(
+            r#"<p class="hint">Email goes out through {host} as {from}.</p>"#,
+            host = escape(&mailer.describe.host),
+            from = escape(&mailer.describe.from),
+        ),
+        None => String::from(
+            r#"<p class="hint bad">No mail server is configured, so an email
+address here will not be delivered. Add an <code>[smtp]</code> section to the
+hub config — see <a href="/settings">Settings</a>.</p>"#,
+        ),
+    };
+
+    let mut body = format!(
         r#"<h1>Alerts</h1><p class="lede">Rules are checked whenever an agent pushes a
 snapshot. A rule that has fired for a target stays quiet about it for six hours.</p>
 <div class="card"><h2 style="margin-top:0">Add a rule</h2>
@@ -822,18 +853,21 @@ snapshot. A rule that has fired for a target stays quiet about it for six hours.
 </select></label>
 <label>Threshold <input name="threshold" type="number" step="any" min="0" value="10" required></label>
 </div>
-<label>Webhook URL <input name="webhook_url" type="url" placeholder="https://…" required></label>
+<label>Send to <input name="destination" placeholder="https://… or ops@example.com" required></label>
 <button type="submit">Add rule</button>
 </form>
-<p class="hint">The webhook receives a JSON POST with the host, the root and a
-readable message. Leave host or root empty to match everything.</p></div>"#,
+<p class="hint">A URL gets a JSON POST with the host, the root and a readable
+message; an email address gets a plain-text message saying the same thing.
+Leave host or root empty to match everything.</p>
+{mail}</div>"#,
+        mail = mail_note,
     );
 
     body.push_str("<h2>Rules</h2>");
     if rules.is_empty() {
         body.push_str("<div class=\"empty\">No rules yet.</div>");
     } else {
-        body.push_str("<table><thead><tr><th>Scope</th><th>Condition</th><th>Webhook</th><th>Added</th><th></th></tr></thead><tbody>");
+        body.push_str("<table><thead><tr><th>Scope</th><th>Condition</th><th>Sends to</th><th>Added</th><th></th></tr></thead><tbody>");
         for rule in &rules {
             body.push_str(&format!(
                 r#"<tr><td>{scope}</td><td>{condition}</td><td>{hook}</td><td>{added}</td>
@@ -846,7 +880,7 @@ readable message. Leave host or root empty to match everything.</p></div>"#,
                     rule.root.as_deref().unwrap_or("any")
                 )),
                 condition = escape(&rule.kind.describe(rule.threshold)),
-                hook = escape(&truncate(&rule.webhook_url, 44)),
+                hook = escape(&truncate(&rule.destination.as_uri(), 44)),
                 added = escape(&html::relative(rule.created_at, now)),
                 id = rule.id,
             ));
@@ -886,7 +920,7 @@ struct AlertForm {
     root: String,
     kind: String,
     threshold: f64,
-    webhook_url: String,
+    destination: String,
 }
 
 async fn create_alert(State(state): State<Arc<AppState>>, Form(form): Form<AlertForm>) -> Response {
@@ -903,7 +937,7 @@ async fn create_alert(State(state): State<Arc<AppState>>, Form(form): Form<Alert
         Some(form.root.as_str()),
         kind,
         form.threshold,
-        &form.webhook_url,
+        &form.destination,
     ) {
         Ok(_) => Redirect::to("/alerts").into_response(),
         Err(err) => error_page("Alerts", &format!("{err:#}")),
@@ -920,6 +954,135 @@ async fn delete_alert(State(state): State<Arc<AppState>>, Form(form): Form<IdFor
         let _ = db::delete_rule(&conn, form.id);
     }
     Redirect::to("/alerts").into_response()
+}
+
+// ---------------------------------------------------------------- settings
+
+/// What the hub is configured to do, and the one button that proves it.
+///
+/// Read-only on purpose. The mail password lives in the config file (or the
+/// file it names), and a form that wrote it back would put a secret into the
+/// database — the file people copy when they move the hub, and the one they
+/// attach to a bug report. The dashboard's job here is to say what the file
+/// produced and to let someone check it without waiting for a disk to fill.
+async fn settings_page(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SettingsQuery>,
+) -> Response {
+    let mut body = String::from(
+        r#"<h1>Settings</h1><p class="lede">Read from the hub's config file at
+startup. Change the file and restart to change what is here.</p>"#,
+    );
+
+    if let Some(outcome) = query.sent.as_deref() {
+        // Echoed back through `escape`, because the relay's own reply goes in
+        // here and it is text from another machine.
+        body.push_str(&match query.ok.as_deref() {
+            Some("1") => format!(
+                r#"<div class="card"><span class="tag ok">sent</span> The relay accepted
+the message. {detail}</div>"#,
+                detail = escape(outcome)
+            ),
+            _ => format!(
+                r#"<div class="card"><span class="tag bad">failed</span> {detail}</div>"#,
+                detail = escape(outcome)
+            ),
+        });
+    }
+
+    body.push_str(r#"<h2>Email</h2>"#);
+    match &state.mailer {
+        None => body.push_str(
+            r#"<div class="empty">No mail server configured. Alert rules can still
+call a webhook. To send email, add an <code>[smtp]</code> section to the hub
+config file and restart:</div>
+<pre class="card">[smtp]
+host = "smtp.example.com"
+port = 587
+security = "starttls"          # "tls" (port 465), "starttls", or "none"
+from = "spacetrace@example.com"
+username = "spacetrace@example.com"
+password_file = "/etc/spacetrace-hub/smtp-password"</pre>"#,
+        ),
+        Some(mailer) => {
+            let d = &mailer.describe;
+            body.push_str(&format!(
+                r#"<table><tbody>
+<tr><th>Relay</th><td>{host}:{port}</td></tr>
+<tr><th>Encryption</th><td>{security}</td></tr>
+<tr><th>From</th><td>{from}</td></tr>
+<tr><th>Sign-in</th><td>{auth}</td></tr>
+</tbody></table>
+<div class="card"><h2 style="margin-top:0">Send a test message</h2>
+<form method="post" action="/settings/test">
+<label>To <input name="to" type="email" placeholder="you@example.com" required></label>
+<button type="submit">Send</button>
+</form>
+<p class="hint">Goes through the same path a real alert takes, so a success
+here means alerts will be delivered and a failure names what went wrong.</p>
+</div>"#,
+                host = escape(&d.host),
+                port = d.port,
+                security = escape(d.security),
+                from = escape(&d.from),
+                // Never the username. What matters operationally is whether a
+                // password is being offered at all; who it belongs to is in
+                // the config file, for the person who has it open.
+                auth = if d.authenticated {
+                    "password (from the config)"
+                } else {
+                    "none — the relay accepts unauthenticated mail"
+                },
+            ));
+        }
+    }
+
+    Html(html::page("Settings", "/settings", &body)).into_response()
+}
+
+#[derive(Deserialize)]
+struct SettingsQuery {
+    #[serde(default)]
+    sent: Option<String>,
+    #[serde(default)]
+    ok: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TestMailForm {
+    to: String,
+}
+
+/// Send one message through the configured relay.
+///
+/// Deliberately not a dry run: it opens the connection, authenticates and
+/// hands over a real message, because every one of those steps is a way a mail
+/// configuration is wrong and a check that skipped them would pass while the
+/// real thing failed.
+async fn send_test_mail(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<TestMailForm>,
+) -> Response {
+    let Some(mailer) = state.mailer.as_deref() else {
+        return Redirect::to("/settings?ok=0&sent=No%20mail%20server%20is%20configured.")
+            .into_response();
+    };
+
+    let (ok, detail) = match mailer
+        .send(
+            form.to.trim(),
+            "spacetrace hub: test message",
+            "This is a test from the spacetrace hub Settings page.\n\n\
+             If you are reading it, alert rules that send email will be delivered \
+             the same way.\n",
+        )
+        .await
+    {
+        Ok(detail) => ("1", detail),
+        Err(detail) => ("0", detail),
+    };
+
+    Redirect::to(&format!("/settings?ok={ok}&sent={}", urlencode(&detail))).into_response()
 }
 
 // ------------------------------------------------------------------ tokens

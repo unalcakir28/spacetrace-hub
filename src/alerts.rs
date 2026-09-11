@@ -10,7 +10,8 @@ use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::db::{self, AlertKind, AlertRule};
+use crate::db::{self, AlertKind, AlertRule, Destination};
+use crate::email::{self, Mailer};
 use crate::fleet::Target;
 use crate::html;
 
@@ -24,7 +25,7 @@ pub struct Firing {
     pub host: String,
     pub root: String,
     pub message: String,
-    pub webhook_url: String,
+    pub destination: Destination,
 }
 
 /// Decide whether one rule fires for one target, ignoring cooldown.
@@ -111,7 +112,7 @@ pub fn collect(conn: &Connection, targets: &[Target], now: i64) -> Result<Vec<(i
                     host: target.host.clone(),
                     root: target.root.clone(),
                     message,
-                    webhook_url: rule.webhook_url.clone(),
+                    destination: rule.destination.clone(),
                 },
             ));
         }
@@ -119,12 +120,44 @@ pub fn collect(conn: &Connection, targets: &[Target], now: i64) -> Result<Vec<(i
     Ok(out)
 }
 
-/// POST the firing to its webhook.
+/// Send the firing wherever its rule says.
 ///
 /// A delivery failure is recorded against the event rather than retried: the
 /// next snapshot will evaluate the rule again, and a hub that queues retries
-/// for an endpoint that is simply gone becomes its own problem.
-pub async fn deliver(client: &reqwest::Client, firing: &Firing) -> Result<String, String> {
+/// for an endpoint that is simply gone becomes its own problem. That reasoning
+/// holds for mail too — a relay that is down will still be down in a minute,
+/// and the relay itself is the thing that does retries properly.
+pub async fn deliver(
+    client: &reqwest::Client,
+    mailer: Option<&Mailer>,
+    firing: &Firing,
+) -> Result<String, String> {
+    match &firing.destination {
+        Destination::Webhook(url) => deliver_webhook(client, url, firing).await,
+        Destination::Email(address) => {
+            // A rule can outlive the configuration that made it deliverable:
+            // someone removes the `[smtp]` section and every email rule
+            // becomes undeliverable. Saying so plainly in the events table is
+            // the whole point — the alternative is mail that silently stops.
+            let mailer = mailer.ok_or_else(|| {
+                "this rule sends email, but the hub has no [smtp] section configured".to_string()
+            })?;
+            mailer
+                .send(
+                    address,
+                    &email::subject_for(&firing.host, &firing.root),
+                    &body_for(firing),
+                )
+                .await
+        }
+    }
+}
+
+async fn deliver_webhook(
+    client: &reqwest::Client,
+    url: &str,
+    firing: &Firing,
+) -> Result<String, String> {
     let body = serde_json::json!({
         "source": "spacetrace-hub",
         "host": firing.host,
@@ -134,7 +167,7 @@ pub async fn deliver(client: &reqwest::Client, firing: &Firing) -> Result<String
     });
 
     let response = client
-        .post(&firing.webhook_url)
+        .post(url)
         .json(&body)
         .timeout(std::time::Duration::from_secs(10))
         .send()
@@ -147,6 +180,24 @@ pub async fn deliver(client: &reqwest::Client, firing: &Firing) -> Result<String
     } else {
         Err(format!("webhook returned {status}"))
     }
+}
+
+/// The text of an alert email.
+///
+/// The message the rule produced, then what produced it. Someone reading this
+/// on a phone has to decide whether to get up, and the second paragraph is
+/// what tells them whether this is the third night in a row.
+fn body_for(firing: &Firing) -> String {
+    format!(
+        "{}\n\nHost: {}\nPath: {}\nRule: #{}\n\n\
+         Sent by spacetrace-hub. This rule will stay quiet for {} hours before \
+         it can fire again for this target.\n",
+        firing.message,
+        firing.host,
+        firing.root,
+        firing.rule_id,
+        COOLDOWN_SECONDS / 3600,
+    )
 }
 
 #[cfg(test)]
@@ -165,7 +216,7 @@ mod tests {
             root: None,
             kind,
             threshold,
-            webhook_url: "https://example.com/hook".into(),
+            destination: Destination::Webhook("https://example.com/hook".into()),
             enabled: true,
             created_at: 0,
         }

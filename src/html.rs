@@ -193,10 +193,11 @@ pub fn page(title: &str, active: &str, body: &str) -> String {
 }
 
 fn nav(active: &str) -> String {
-    const LINKS: [(&str, &str); 4] = [
+    const LINKS: [(&str, &str); 5] = [
         ("/", "Fleet"),
         ("/alerts", "Alerts"),
         ("/tokens", "Agents"),
+        ("/settings", "Settings"),
         ("/about", "About"),
     ];
     LINKS

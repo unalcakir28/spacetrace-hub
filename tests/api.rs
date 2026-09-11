@@ -46,6 +46,12 @@ impl Hub {
 }
 
 async fn start_hub(keep: Option<usize>) -> Hub {
+    start_hub_with(keep, "").await
+}
+
+/// Same, with extra TOML appended — for the settings the router reads at
+/// startup rather than per request.
+async fn start_hub_with(keep: Option<usize>, extra: &str) -> Hub {
     let home = tempfile::tempdir().unwrap();
     let db = home.path().join("hub.sqlite");
 
@@ -53,6 +59,7 @@ async fn start_hub(keep: Option<usize>) -> Hub {
     if let Some(keep) = keep {
         toml.push_str(&format!("keep_per_target = {keep}\n"));
     }
+    toml.push_str(extra);
     let config: Config = toml::from_str(&toml).unwrap();
 
     // Both migrations, exactly as main.rs does before serving.
@@ -722,4 +729,130 @@ async fn creating_an_agent_token_shows_it_exactly_once() {
         .await
         .unwrap();
     assert_eq!(response.status(), 200);
+}
+
+// ------------------------------------------------------------- email alerts
+
+/// Without `[smtp]`, the hub still runs and says plainly that it cannot send
+/// mail. The failure this guards against is a settings page that renders
+/// nothing, leaving someone to conclude the feature does not exist.
+#[tokio::test]
+async fn the_settings_page_says_when_no_mail_is_configured() {
+    let hub = start_hub(None).await;
+    let body = client()
+        .get(hub.url("/settings"))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("No mail server configured"), "{body}");
+    assert!(body.contains("[smtp]"), "it must show what to add");
+    assert!(
+        !body.contains("Send a test message"),
+        "there is nothing to test against"
+    );
+}
+
+/// With `[smtp]`, the page describes the relay — and must not describe the
+/// password. The whole reason credentials stay in the config file.
+#[tokio::test]
+async fn the_settings_page_describes_the_relay_without_its_password() {
+    let hub = start_hub_with(
+        None,
+        r#"
+[smtp]
+host = "smtp.example.com"
+port = 2525
+security = "starttls"
+from = "hub@example.com"
+username = "hub@example.com"
+password = "hunter2-should-never-appear"
+"#,
+    )
+    .await;
+
+    let body = client()
+        .get(hub.url("/settings"))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(body.contains("smtp.example.com:2525"), "{body}");
+    assert!(
+        body.contains("hub@example.com"),
+        "the From address is shown"
+    );
+    assert!(body.contains("Send a test message"));
+    assert!(
+        !body.contains("hunter2"),
+        "the password must never reach the page"
+    );
+}
+
+/// An email rule is accepted and listed as one. The form posts a bare address
+/// and the dashboard shows the stored `mailto:` form, which is the round trip
+/// a person actually sees.
+#[tokio::test]
+async fn an_alert_rule_can_send_email() {
+    let hub = start_hub(None).await;
+
+    let created = client()
+        .post(hub.url("/alerts"))
+        .bearer_auth(ADMIN)
+        .form(&[
+            ("host", ""),
+            ("root", ""),
+            ("kind", "free_below_percent"),
+            ("threshold", "10"),
+            ("destination", "ops@example.com"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 303, "a created rule redirects back");
+
+    let body = client()
+        .get(hub.url("/alerts"))
+        .bearer_auth(ADMIN)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("mailto:ops@example.com"), "{body}");
+    // And with no relay configured it has to say the rule will not deliver,
+    // rather than listing it as though it were fine.
+    assert!(body.contains("No mail server is configured"), "{body}");
+}
+
+/// A destination that is neither must be refused at the form, not stored and
+/// discovered at delivery time.
+#[tokio::test]
+async fn a_destination_that_is_neither_url_nor_address_is_refused() {
+    let hub = start_hub(None).await;
+
+    let response = client()
+        .post(hub.url("/alerts"))
+        .bearer_auth(ADMIN)
+        .form(&[
+            ("host", ""),
+            ("root", ""),
+            ("kind", "free_below_percent"),
+            ("threshold", "10"),
+            ("destination", "somewhere"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "the error page, not a redirect");
+    assert_eq!(db::list_rules(&hub.conn()).unwrap().len(), 0);
 }

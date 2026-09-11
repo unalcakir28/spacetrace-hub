@@ -36,6 +36,125 @@ pub struct Config {
     /// collecting from a fleet every night will grow without bound.
     #[serde(default)]
     pub keep_per_target: Option<usize>,
+
+    /// Outgoing mail, for alert rules that send email.
+    ///
+    /// Absent means the hub sends no mail and says so on the settings page,
+    /// rather than accepting email rules it cannot deliver. Webhook rules are
+    /// unaffected — they need nothing configured.
+    #[serde(default)]
+    pub smtp: Option<SmtpConfig>,
+}
+
+/// How to talk to the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpSecurity {
+    /// TLS from the first byte. Port 465, and what to choose when unsure.
+    Tls,
+    /// Plaintext, upgraded by STARTTLS. Port 587, what most providers document.
+    Starttls,
+    /// No encryption. A relay on localhost, and nothing else.
+    None,
+}
+
+impl SmtpSecurity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SmtpSecurity::Tls => "tls",
+            SmtpSecurity::Starttls => "starttls",
+            SmtpSecurity::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmtpConfig {
+    pub host: String,
+    #[serde(default = "default_smtp_port")]
+    pub port: u16,
+    #[serde(default = "default_smtp_security")]
+    pub security: SmtpSecurity,
+    /// Envelope sender. Providers reject mail whose `From` is not an address
+    /// the account is allowed to send as, so this is not cosmetic.
+    pub from: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Prefer `password_file`. An inline password is in the config file, which
+    /// is the file people paste into issues.
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub password_file: Option<PathBuf>,
+    /// For an internal relay with a certificate no public root signed.
+    ///
+    /// Named for what it does rather than for what it enables. It turns off
+    /// the check that the machine answering is the one asked for, so a
+    /// configuration with this set is only as private as the network it runs
+    /// on.
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+    #[serde(default = "default_smtp_timeout")]
+    pub timeout_seconds: u64,
+}
+
+fn default_smtp_port() -> u16 {
+    587
+}
+
+fn default_smtp_security() -> SmtpSecurity {
+    SmtpSecurity::Starttls
+}
+
+fn default_smtp_timeout() -> u64 {
+    15
+}
+
+impl SmtpConfig {
+    /// The password, from the file when one is named.
+    ///
+    /// The file wins over the inline value rather than the other way round: if
+    /// someone has bothered to put the secret in a file, an old inline copy
+    /// left behind in the config is the stale one.
+    pub fn password(&self) -> Result<Option<String>> {
+        if let Some(path) = &self.password_file {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let password = raw.trim().to_string();
+            anyhow::ensure!(
+                !password.is_empty(),
+                "smtp password file is empty: {}",
+                path.display()
+            );
+            return Ok(Some(password));
+        }
+        Ok(self.password.clone().filter(|p| !p.is_empty()))
+    }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(!self.host.trim().is_empty(), "smtp.host must not be empty");
+        anyhow::ensure!(!self.from.trim().is_empty(), "smtp.from must not be empty");
+        anyhow::ensure!(self.port > 0, "smtp.port must not be zero");
+        // A username with no password is a configuration half-written, and it
+        // fails at the relay with an error nobody connects back to this file.
+        if self.username.is_some() {
+            anyhow::ensure!(
+                self.password.is_some() || self.password_file.is_some(),
+                "smtp.username is set but no password is: give smtp.password_file \
+                 (preferred) or smtp.password"
+            );
+        }
+        if self.security == SmtpSecurity::None {
+            anyhow::ensure!(
+                self.username.is_none(),
+                "smtp.security = \"none\" sends the password in the clear; use \
+                 \"starttls\" or \"tls\", or drop the username for an unauthenticated \
+                 local relay"
+            );
+        }
+        Ok(())
+    }
 }
 
 fn default_listen() -> SocketAddr {
@@ -57,6 +176,9 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if let Some(smtp) = &self.smtp {
+            smtp.validate()?;
+        }
         if let Some(keep) = self.keep_per_target {
             anyhow::ensure!(
                 keep > 0,
@@ -117,6 +239,18 @@ admin_token_file = "/etc/spacetrace-hub/admin-token"
 # Snapshots to keep per (host, root). A fleet scanning nightly will fill a disk
 # eventually, which would be an unusually poor look for this particular tool.
 keep_per_target = 90
+
+# Outgoing mail, for alert rules that send email instead of calling a webhook.
+# Leave the whole section out and the hub sends no mail; webhook rules still
+# work and the Settings page says why the email field is unavailable.
+#
+# [smtp]
+# host = "smtp.example.com"
+# port = 587
+# security = "starttls"          # "tls" (port 465), "starttls", or "none"
+# from = "spacetrace@example.com"
+# username = "spacetrace@example.com"
+# password_file = "/etc/spacetrace-hub/smtp-password"
 "#;
 
 #[cfg(test)]
@@ -162,6 +296,7 @@ mod tests {
         std::fs::write(&path, "  s3cret\n\n").unwrap();
 
         let config = Config {
+            smtp: None,
             db: PathBuf::from("/tmp/x"),
             listen: default_listen(),
             admin_token: None,
@@ -182,6 +317,7 @@ mod tests {
         std::fs::write(&path, "from-file").unwrap();
 
         let config = Config {
+            smtp: None,
             db: PathBuf::from("/tmp/x"),
             listen: default_listen(),
             admin_token: Some("inline".into()),
@@ -202,6 +338,7 @@ mod tests {
         std::fs::write(&path, "  \n").unwrap();
 
         let config = Config {
+            smtp: None,
             db: PathBuf::from("/tmp/x"),
             listen: default_listen(),
             admin_token: None,
@@ -215,6 +352,7 @@ mod tests {
     #[test]
     fn a_blank_inline_token_falls_through_rather_than_being_accepted() {
         let config = Config {
+            smtp: None,
             db: PathBuf::from("/tmp/x"),
             listen: default_listen(),
             admin_token: Some("   ".into()),
