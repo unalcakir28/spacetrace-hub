@@ -10,6 +10,13 @@ Versions marked *development milestone* were never tagged and have no
 downloadable files. They are recorded because the work happened, not
 because anyone can install them.
 
+## Unreleased
+
+### Added
+
+- An alert rule can send email instead of calling a webhook. Type an address where the URL goes; a rule keeps exactly one destination, so there is nothing to get out of step. Mail is configured in an `[smtp]` section of the hub config file rather than in the dashboard, because the database is the file you back up and a password in it travels with every copy. A new Settings page shows the relay, never the password, and sends a test message through the same path an alert takes — so a success there means alerts will arrive, and a failure names what is wrong before a disk fills.
+- People, instead of one shared credential. A new People page issues a token per person with one of two roles: a viewer sees the whole fleet and can change none of it, an admin can change anything including who else has access. Alert rules now record who added them, which is the question a shared login could never answer. Tokens rather than passwords, on purpose — a generated token can be stored as a plain hash because there is nothing to guess, and a chosen password could not. The token in the hub's config file keeps working and stays an admin: it is the way back in, which is why the last admin cannot revoke themselves either.
+
 ## 0.4.0 — 2026-09-10
 
 ### Added
