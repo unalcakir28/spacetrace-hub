@@ -230,10 +230,25 @@ tablolarını tutuyor, ve ikisinin migration'ı bağımsız:
   bir test tam regresyonun geçeceği anda yeşil kalır.
 - `yarn`/npm yok, bağımlılık eklemekte cimri ol — bkz. yukarıdaki "build step
   yok".
-- **Bu depoda `.claude/` yok.** Çekirdek deponun becerileri (changelog,
-  release, preflight) burada geçerli değil; changelog kaynağı
-  `crates/changelog/changelog.json` orada, yani changelog girdisi ve sürüm
-  kesme çekirdek checkout'undan sürülüyor.
+- **Çekirdek deponun `.claude/` araçları burada geçerli değil.** Changelog
+  girdisi yazmak hâlâ çekirdek checkout'undan sürülüyor: kaynak
+  `crates/changelog/changelog.json` orada.
+
+## Depoda duran Claude araçları
+
+| Araç | Ne zaman |
+|------|----------|
+| `preflight` (beceri) | Push öncesi; `--locked` farkı ve iki yanıltıcı test hatası orada yazılı |
+| `release` (beceri) | Sürüm kesme; sürüm notlarının niye awk ile dilimlendiği dahil |
+
+İkisi de `disable-model-invocation`: kullanıcı `/preflight`, `/release` yazar.
+
+Paylaşılan araçlar `spacetrace-tools` plugin'inden geliyor ve `spacetrace-tools:`
+ile adlandırılıyor: `core-pin-guard` (pin ilerletmeden önce çekirdek API
+diff'i), `doc-drift-auditor`, `code-reviewer`, `test-writer`, ve üretilen
+`CHANGELOG.md`'yi koruyan hook — bu depoya ayrı bir hook gerekmedi. Plugin
+**depoda değil**, ana dizindeki `spacetrace-tooling/` içinde — klonla
+gelmiyor.
 
 ## Testler
 
