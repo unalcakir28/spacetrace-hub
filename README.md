@@ -128,15 +128,28 @@ the pages say which is which.
 
 ## HTTP API
 
+The credential column is the whole authorization model: `signed in` means any
+role, `admin` means the write routes, and they are separate router groups
+rather than checks inside the handlers.
+
 | Method | Route | Credential | Purpose |
 |---|---|---|---|
 | GET | `/health` | none | Liveness and version |
+| GET/POST | `/login` | none | Sign in |
 | POST | `/snapshots` | agent | Accept a pushed snapshot |
-| GET | `/api/fleet` | admin | Every target with its trend, as JSON |
-| GET | `/` | admin | Fleet dashboard |
-| GET | `/target?host=&root=` | admin | One target's history and latest diff |
-| GET | `/alerts` | admin | Rules and what has fired |
-| GET | `/tokens` | admin | Agent tokens |
+| GET | `/` | signed in | Fleet dashboard |
+| GET | `/target?host=&root=` | signed in | One target's history and latest diff |
+| GET | `/alerts` | signed in | Rules and what has fired |
+| GET | `/tokens` | signed in | Agent tokens |
+| GET | `/people` | signed in | Dashboard accounts |
+| GET | `/settings` | signed in | Mail configuration, read-only |
+| GET | `/about` | signed in | Version and changelog |
+| GET | `/api/fleet` | signed in | Every target with its trend, as JSON |
+| POST | `/logout` | signed in | Sign out |
+| POST | `/alerts`, `/alerts/delete` | admin | Create or delete a rule |
+| POST | `/tokens`, `/tokens/revoke` | admin | Create or revoke an agent token |
+| POST | `/people`, `/people/revoke` | admin | Create or revoke an account |
+| POST | `/settings/test` | admin | Send a real test mail |
 
 `POST /snapshots` accepts `Content-Encoding: zstd`. Decompression is bounded, so
 a small compressed body cannot expand into an arbitrarily large one.
@@ -164,7 +177,7 @@ The dashboard is server-rendered by hand: a self-hosted tool that needs
 ## Develop
 
 ```bash
-cargo test                                  # 94 tests
+cargo test                                  # 123 tests, no service containers
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
