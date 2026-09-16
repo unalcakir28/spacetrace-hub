@@ -1,47 +1,50 @@
-# Sürüm
+# Release
 
-Bu depo private (K2), ama ikililerin indirme bağlantısı public olmak zorunda —
-private bir deponun release varlıkları kimlik doğrulaması olmadan indirilemiyor.
-Bu yüzden `.github/workflows/release.yml` burada derliyor, **public
-`unalcakir28/spacetrace` deposuna yayınlıyor**. Konteyner imajı ise doğrudan
-GHCR'a gidiyor.
+This repository is private (K2), but the binaries' download link has to be
+public — a private repository's release assets can't be downloaded without
+authentication. That's why `.github/workflows/release.yml` builds here, and
+**publishes to the public `unalcakir28/spacetrace` repository**. The
+container image, however, goes straight to GHCR.
 
-Tam gerekçe ve üç bileşenin ortak şeması: çekirdek deposundaki
+Full rationale and the shared scheme across the three components: the core
+repository's
 [docs/RELEASING.md](https://github.com/unalcakir28/spacetrace/blob/main/docs/RELEASING.md).
 
-## Ne zaman ne oluyor
+## What happens when
 
-| Olay | İkililer | İmaj |
+| Event | Binaries | Image |
 |------|----------|------|
-| `main`'e push | public depoda `hub-continuous` | `ghcr.io/…/spacetrace-hub:main`, `:edge` |
-| `v*` etiketi push | public depoda `hub-v*` | `:v*`, `:latest` |
-| `workflow_dispatch` | derler, yayınlamaz — `publish: true` verilmedikçe | — |
+| Push to `main` | `hub-continuous` in the public repo | `ghcr.io/…/spacetrace-hub:main`, `:edge` |
+| Push of a `v*` tag | `hub-v*` in the public repo | `:v*`, `:latest` |
+| `workflow_dispatch` | builds, does not publish — unless `publish: true` is given | — |
 
-`*.md` ve `tasks/**` değişiklikleri iş akışını tetiklemiyor.
+Changes to `*.md` and `tasks/**` do not trigger the workflow.
 
-Üretilen arşivler — adları sabit, indirme sayfası bunlara doğrudan bağlanıyor:
+Generated archives — their names are fixed, the download page links to them
+directly:
 
 ```
-spacetrace-hub-<sürüm>-x86_64-unknown-linux-musl.tar.gz
-spacetrace-hub-<sürüm>-aarch64-unknown-linux-musl.tar.gz
-spacetrace-hub-<sürüm>-aarch64-apple-darwin.tar.gz
-spacetrace-hub-<sürüm>-x86_64-apple-darwin.tar.gz
+spacetrace-hub-<version>-x86_64-unknown-linux-musl.tar.gz
+spacetrace-hub-<version>-aarch64-unknown-linux-musl.tar.gz
+spacetrace-hub-<version>-aarch64-apple-darwin.tar.gz
+spacetrace-hub-<version>-x86_64-apple-darwin.tar.gz
 SHA256SUMS
 ```
 
-Her arşivde ikili, README ve `docker-compose.yml` var.
+Each archive contains the binary, a README and `docker-compose.yml`.
 
-## İmaj neden kaynaktan derlenmiyor
+## Why the image isn't built from source
 
-`.github/docker/Dockerfile.release` yalnızca **önceden derlenmiş** musl ikilisini
-kopyalıyor; buildx her platform için `TARGETARCH`'ı ayarlıyor. Depo kökündeki
-`Dockerfile` kaynaktan derlemeye devam ediyor ve `docker build .` bir klonda
-çalışıyor — ama çok mimarili bir sürüm derlemesi için yanlış araç: amd64 bir
-runner'da arm64 imajını böyle kurmak Rust'ı QEMU altında derlemek demek, onlarca
-dakika sürüyor ve düzenli olarak belleği tüketiyor. İkililer zaten `cross` ile
-doğal hızda derleniyor, dolayısıyla ikinci kez derlemenin bir anlamı yok.
+`.github/docker/Dockerfile.release` only copies the **already-built** musl
+binary; buildx sets `TARGETARCH` for each platform. The `Dockerfile` at the
+repo root still builds from source, and `docker build .` works in a clone —
+but it's the wrong tool for a multi-arch release build: building an arm64
+image that way on an amd64 runner means compiling Rust under QEMU, which
+takes tens of minutes and regularly runs out of memory. The binaries are
+already built at native speed with `cross`, so building a second time gains
+nothing.
 
-## Gereken elle adımlar
+## Manual steps required
 
 ### 1. `RELEASE_TOKEN`
 
@@ -49,21 +52,22 @@ doğal hızda derleniyor, dolayısıyla ikinci kez derlemenin bir anlamı yok.
 gh secret set RELEASE_TOKEN --repo unalcakir28/spacetrace-hub
 ```
 
-Fine-grained PAT, yalnızca `unalcakir28/spacetrace` deposunda **Contents: Read
-and write**. Sır yoksa iş akışı hata vermez — varlıkları bu private depoda
-yayınlar ve uyarı basar; imaj yayını etkilenmez.
+Fine-grained PAT, **Contents: Read and write** on the
+`unalcakir28/spacetrace` repository only. If the secret is missing, the
+workflow does not fail — it publishes the assets to this private repo and
+prints a warning; image publishing is unaffected.
 
-### 2. İmajı public yap
+### 2. Make the image public
 
-Private bir depodan oluşturulan GHCR paketi private başlıyor, yani
-`docker pull` kimlik doğrulaması ister. Bir kez:
+A GHCR package created from a private repository starts out private, meaning
+`docker pull` requires authentication. Once:
 
 <https://github.com/users/unalcakir28/packages/container/spacetrace-hub/settings>
 → Change visibility → **Public**.
 
-## Kararlı sürüm kesmek
+## Cutting a stable release
 
-`Cargo.toml` içindeki `version`'ı yükselt, sonra:
+Bump `version` in `Cargo.toml`, then:
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
