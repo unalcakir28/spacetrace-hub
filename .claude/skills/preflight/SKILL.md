@@ -1,7 +1,6 @@
 ---
 name: preflight
-description: Run everything CI runs for the hub, cheapest first, before pushing to main. Use when the user asks to check, verify, validate or preflight before a push — "push etmeden önce kontrol et", "her şey yeşil mi", "CI geçer mi".
-disable-model-invocation: true
+description: Runs everything CI runs for the hub, cheapest first. Use before any push to main, after finishing a change and before committing it, after adding a route or touching the config schema, after a core pin bump, and whenever someone asks whether CI will pass — including Turkish phrasings like "push etmeden önce kontrol et", "her şey yeşil mi", "CI geçer mi".
 ---
 
 # Preflight — spacetrace-hub
