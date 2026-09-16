@@ -247,8 +247,8 @@ Paylaşılan araçlar `spacetrace-tools` plugin'inden geliyor ve `spacetrace-too
 ile adlandırılıyor: `core-pin-guard` (pin ilerletmeden önce çekirdek API
 diff'i), `doc-drift-auditor`, `code-reviewer`, `test-writer`, ve üretilen
 `CHANGELOG.md`'yi koruyan hook — bu depoya ayrı bir hook gerekmedi. Plugin
-**depoda değil**, ana dizindeki `spacetrace-tooling/` içinde — klonla
-gelmiyor.
+**bu depoda değil**, yanındaki `spacetrace-tooling/` private deposunda — bu
+depoyu klonlamak onu getirmiyor, ayrıca kurulması gerekiyor.
 
 ## Testler
 
