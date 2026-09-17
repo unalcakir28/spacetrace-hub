@@ -47,10 +47,11 @@ Cross-compilation covers four targets: `x86_64-unknown-linux-musl`,
 through the passthrough list in it; if the list is missing, the musl
 binaries build **without a stamp**.
 
-There is no `scripts/`, Makefile, `.claude/` or `tasks/`. `.playwright-mcp/`
-is gitignored — it is the browser-automation cache that accumulates while
-reviewing pages visually (20 screenshots, 31 accessibility snapshots, one
-console log), not an authority.
+There is no `scripts/`, Makefile or `tasks/` here; `.claude/` holds the two
+skills listed below. `.playwright-mcp/` is gitignored — it is the
+browser-automation cache that accumulates while reviewing pages visually
+(20 screenshots, 31 accessibility snapshots, one console log), not an
+authority.
 
 ## Core dependency: the only pin is in Cargo.lock
 
@@ -86,8 +87,10 @@ So the only pin is `Cargo.lock`. The consequences:
 
    Its guard is `every_write_route_is_in_this_list` in `tests/api.rs`: it
    **parses `src/web.rs` as text**, finds every `.route(…, post(…))` and
-   fails if it is not in `WRITE_ROUTES`. The allowlist holds only `/login`,
-   `/logout`, `/snapshots`. **Adding a POST route without updating
+   fails if it is not in `WRITE_ROUTES`. `WRITE_ROUTES` holds the seven
+   routes a viewer must be refused, each with a form body to post; the only
+   paths the test skips are `/login`, `/logout` and `/snapshots`, which are
+   not changes to the fleet. **Adding a POST route without updating
    `WRITE_ROUTES` breaks the test suite.**
 2. **The two credentials are not interchangeable.** The agent token can only
    do `POST /snapshots`; a person account (`viewer` | `admin`) sees the
