@@ -47,8 +47,8 @@ Cross-compilation covers four targets: `x86_64-unknown-linux-musl`,
 through the passthrough list in it; if the list is missing, the musl
 binaries build **without a stamp**.
 
-There is no `scripts/`, Makefile or `tasks/` here; `.claude/` holds the two
-skills listed below. `.playwright-mcp/` is gitignored — it is the
+There is no `scripts/`, Makefile or `tasks/` here; `.claude/` holds the skills
+listed below and no local hook. `.playwright-mcp/` is gitignored — it is the
 browser-automation cache that accumulates while reviewing pages visually
 (20 screenshots, 31 accessibility snapshots, one console log), not an
 authority.
@@ -260,8 +260,9 @@ tables, and the two migrations are independent:
 |------|----------|
 | `preflight` (skill) | Before a push; the `--locked` difference and two misleading test failures are written there |
 | `release` (skill) | Cutting a release; including why the release notes are sliced with awk |
+| `pin-bump` (skill) | Moving the core pin; the order, and the one test failure that means something other than what it says |
 
-Both **trigger on their own** — they do not wait for you to type
+All three **trigger on their own** — they do not wait for you to type
 `/preflight`. The commit/tag/push steps of `release` are gated on approval
 in the skill's body.
 
