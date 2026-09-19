@@ -9,21 +9,16 @@ name: Release
 #   * a container image on ghcr.io, amd64 and arm64, assembled from those same
 #     binaries rather than compiled under emulation.
 #
-#   push to main   -> tag `hub-continuous` and image tags `main` / `edge`
 #   push of a v*   -> tag `hub-v…` and image tags `v…` / `latest`
+#
+# That is the only trigger. Pushing to `main` used to build a rolling
+# `hub-continuous` tag and `main` / `edge` images; removed 19 September 2026,
+# along with the `paths-ignore` filter, which after that removal could only
+# ever have skipped a tag push and published nothing.
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-    # CHANGELOG.md is named out of this list deliberately: it is not
-    # documentation but the release notes themselves, and a push that only
-    # touches it must still rebuild, or the continuous release keeps describing
-    # the version before it. The filter applies to tag pushes too.
-    paths-ignore:
-      - "README.md"
-      - "RELEASING.md"
-      - "tasks/**"
   workflow_dispatch:
     inputs:
       tag:
@@ -54,9 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.pick.outputs.version }}
-      rolling: ${{ steps.pick.outputs.rolling }}
       tag: ${{ steps.pick.outputs.tag }}
-      channel: ${{ steps.pick.outputs.channel }}
     steps:
       - uses: actions/checkout@v5
       - id: pick
@@ -65,14 +58,10 @@ jobs:
         run: |
           tagged=false
           if [ -n "${INPUT_TAG:-}" ]; then
-            version="$INPUT_TAG"; rolling=false
-          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            version="$GITHUB_REF_NAME"; rolling=false; tagged=true
+            version="$INPUT_TAG"
           else
-            version=continuous; rolling=true
+            version="$GITHUB_REF_NAME"; tagged=true
           fi
-
-          if [ "$rolling" = true ]; then channel=continuous; else channel=release; fi
 
           # A tag that disagrees with Cargo.toml ships a binary that lies about
           # its own version: hub-v0.2.0 in the file name, 0.1.0 from /health.
@@ -87,8 +76,6 @@ jobs:
           fi
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "rolling=$rolling" >> "$GITHUB_OUTPUT"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "tag=hub-$version" >> "$GITHUB_OUTPUT"
           echo "Building as hub-$version" >> "$GITHUB_STEP_SUMMARY"
 
@@ -134,8 +121,9 @@ jobs:
 
       - name: Build
         shell: bash
-        # Stamped in so /health and the About page can say which build this is,
-        # not only which version — every continuous build shares one number.
+        # Stamped in so /health and the About page can say which build this
+        # is, not only which version: a retag or a rebuild of the same version
+        # is a different binary.
         # Passed through the environment because `cross` builds in a container
         # with no checkout, and because a build script that shells out to git
         # only reruns when cargo thinks its inputs changed.
@@ -180,6 +168,13 @@ jobs:
           name: archive-${{ matrix.target }}
           path: dist/*.tar.gz
           if-no-files-found: error
+          # One day, not the 90-day default. This only has to survive until
+          # `publish` downloads it later in the same run; the durable copies
+          # are the release assets. At the default, this workflow's output
+          # from every push sat for three months — the desktop repo's did
+          # exactly that until it filled the account's 0.5 GB Actions storage
+          # and took a release down with it.
+          retention-days: 1
 
       - uses: actions/upload-artifact@v4
         if: matrix.arch != ''
@@ -190,6 +185,13 @@ jobs:
           # is lost.
           path: image
           if-no-files-found: error
+          # One day, not the 90-day default. This only has to survive until
+          # `publish` downloads it later in the same run; the durable copies
+          # are the release assets. At the default, this workflow's output
+          # from every push sat for three months — the desktop repo's did
+          # exactly that until it filled the account's 0.5 GB Actions storage
+          # and took a release down with it.
+          retention-days: 1
 
   publish:
     name: publish ${{ needs.meta.outputs.tag }}
@@ -243,7 +245,6 @@ jobs:
           REPO: ${{ steps.dest.outputs.repo }}
           TAG: ${{ needs.meta.outputs.tag }}
           VERSION: ${{ needs.meta.outputs.version }}
-          ROLLING: ${{ needs.meta.outputs.rolling }}
         run: |
           # The changes come out of CHANGELOG.md rather than from a generator.
           # The generator lives in the core repo and is not a command here, but
@@ -252,11 +253,7 @@ jobs:
           # these notes match the changelog compiled into the binary being
           # published. Running the tool against the core's main branch would
           # not.
-          if [ "$ROLLING" = "true" ]; then
-            section="Unreleased"
-          else
-            section="${VERSION#v} — "
-          fi
+          section="${VERSION#v} — "
           awk -v want="$section" '
             index($0, "## " want) == 1 { on = 1; next }
             on && /^## / { exit }
@@ -265,7 +262,7 @@ jobs:
 
           # A release with no notes is worse than no release: the reader cannot
           # tell whether the notes are missing or the version was empty.
-          if [ "$ROLLING" != "true" ] && [ ! -s changes.md ]; then
+          if [ ! -s changes.md ]; then
             echo "::error::CHANGELOG.md has no section for ${VERSION}"
             exit 1
           fi
@@ -287,27 +284,18 @@ jobs:
             cat changes.md >> notes.md
           fi
 
-          if [ "$ROLLING" = "true" ]; then
-            gh release delete "$TAG" --repo "$REPO" --cleanup-tag --yes || true
-            gh release create "$TAG" artifacts/* \
-              --repo "$REPO" \
-              --prerelease \
-              --title "Hub — continuous build (main)" \
-              --notes-file notes.md
-          else
-            # --latest=false: the download repository holds all three
-            # components, and `gh release create` otherwise makes whichever
-            # published most recently GitHub's "latest". That endpoint belongs
-            # to the CLI — `spacetrace update` and the agent in versions up to
-            # v0.4.0 read it, and a hub tag there parses as no version at all,
-            # so those installs go quiet and stay quiet. Measured on 9 Sept
-            # 2026, when hub-v0.3.0 took the slot.
-            gh release create "$TAG" artifacts/* \
-              --repo "$REPO" \
-              --latest=false \
-              --title "spacetrace hub $VERSION" \
-              --notes-file notes.md
-          fi
+          # --latest=false: the download repository holds all three
+          # components, and `gh release create` otherwise makes whichever
+          # published most recently GitHub's "latest". That endpoint belongs
+          # to the CLI — `spacetrace update` and the agent in versions up to
+          # v0.4.0 read it, and a hub tag there parses as no version at all,
+          # so those installs go quiet and stay quiet. Measured on 9 Sept
+          # 2026, when hub-v0.3.0 took the slot.
+          gh release create "$TAG" artifacts/* \
+            --repo "$REPO" \
+            --latest=false \
+            --title "spacetrace hub $VERSION" \
+            --notes-file notes.md
 
       - uses: docker/setup-buildx-action@v3
 
@@ -321,13 +309,8 @@ jobs:
         id: tags
         env:
           VERSION: ${{ needs.meta.outputs.version }}
-          ROLLING: ${{ needs.meta.outputs.rolling }}
         run: |
-          if [ "$ROLLING" = "true" ]; then
-            echo "list=${IMAGE}:main,${IMAGE}:edge" >> "$GITHUB_OUTPUT"
-          else
-            echo "list=${IMAGE}:${VERSION},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
-          fi
+          echo "list=${IMAGE}:${VERSION},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:
