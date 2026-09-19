@@ -5,8 +5,9 @@ description: Runs everything CI runs for the hub, cheapest first. Use before any
 
 # Preflight — spacetrace-hub
 
-CI is a two-platform matrix (`ubuntu-latest`, `macos-latest`) on stable Rust.
-Run the steps **in order** and stop at the first failure.
+CI is a single `ubuntu-latest` job on stable Rust — lint and tests were merged,
+and the macOS leg was dropped. Run the steps **in order** and stop at the first
+failure.
 
 Note that CI runs `cargo build` and `cargo test` **without `--locked`**; only the
 release workflow passes it. So a green CI does not prove the core pin is the one

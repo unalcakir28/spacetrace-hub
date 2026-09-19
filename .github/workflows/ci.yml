@@ -8,30 +8,38 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-jobs:
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --all-targets
-      # The integration tests bind a real socket and stand up a real webhook
-      # receiver, so they need no service containers.
-      - run: cargo test
+# A second push to the same branch makes the first run's answer worthless, and
+# without this it still runs to completion on its own runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
-  lint:
+jobs:
+  # One job, not two. Lint and test both compiled the whole crate on their own
+  # runner; here `cargo test` reuses what clippy already built. The separate
+  # `cargo build --all-targets` step is gone with them — `clippy --all-targets`
+  # already fails on anything that does not build.
+  #
+  # Linux only. The macOS leg of the old matrix billed at 10x for a server that
+  # is deployed on Linux; the release workflow still builds and ships both
+  # darwin targets, so a macOS-only breakage surfaces there instead.
+  check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@v2
+
+      # Cheapest check first: a formatting failure should not wait behind a
+      # full test compile.
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+
+      # The integration tests bind a real socket and stand up a real webhook
+      # receiver, so they need no service containers.
+      - run: cargo test

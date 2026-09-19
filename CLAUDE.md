@@ -308,8 +308,9 @@ cargo test    # no service container, live DB or network access needed
   toolchain**: `rusqlite` with the `bundled` feature compiles SQLite from
   source, and `zstd` and lettre's `ring` carry C/asm too. That is why the
   Dockerfile at the root does `apk add musl-dev`.
-- The CI matrix is `ubuntu-latest` + `macos-latest`, toolchain `stable` (not
-  1.85).
+- CI is a single `ubuntu-latest` job, toolchain `stable` (not 1.85). The
+  macOS leg was dropped: this is a server deployed on Linux, and the release
+  workflow still builds and ships both darwin targets.
 
 ## Releasing
 
