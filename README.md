@@ -22,8 +22,9 @@ Static musl binaries for Linux (x86_64, aarch64) and macOS are on the
 They are built here and published into the
 [public core repository's releases](https://github.com/unalcakir28/spacetrace/releases),
 because a private repository's release assets need a credential to download.
-Two channels: `hub-v*` for a tagged release, `hub-continuous` for the newest
-`main`. See [RELEASING.md](RELEASING.md).
+One channel, `hub-v*`: a `v*` tag is the only thing that builds anything, and a
+push to `main` publishes nothing. The rolling `hub-continuous` builds of `main`
+were removed on 19 September 2026. See [RELEASING.md](RELEASING.md).
 
 ## Status
 

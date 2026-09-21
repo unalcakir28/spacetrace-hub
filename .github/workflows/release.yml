@@ -27,8 +27,8 @@ on:
       publish:
         description: >-
           Publish the result. Off by default, so a dispatch is a dry run.
-          Turn it on to release a tag by hand — which is the way out if the
-          paths-ignore filter above skipped a tag push.
+          Turn it on to release a tag by hand — which is the way out if a
+          tag push ran no workflow at all.
         type: boolean
         default: false
 

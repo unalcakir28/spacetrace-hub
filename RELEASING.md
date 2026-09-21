@@ -14,11 +14,19 @@ repository's
 
 | Event | Binaries | Image |
 |------|----------|------|
-| Push to `main` | `hub-continuous` in the public repo | `ghcr.io/…/spacetrace-hub:main`, `:edge` |
+| Push to `main` | nothing | nothing |
 | Push of a `v*` tag | `hub-v*` in the public repo | `:v*`, `:latest` |
 | `workflow_dispatch` | builds, does not publish — unless `publish: true` is given | — |
 
-Changes to `*.md` and `tasks/**` do not trigger the workflow.
+**A `v*` tag is the only trigger**, since 19 September 2026. A push to `main`
+used to publish a rolling `hub-continuous` pre-release and the `:main` / `:edge`
+images; that went when the same rolling channel was removed from all three
+repositories.
+
+There is **no `paths-ignore`**, deliberately. It only ever applied to pushes, so
+with `main` gone its one remaining effect would be to skip a *tag* push whose
+commit happened to touch only documentation — publishing nothing and saying
+nothing. Do not put one back.
 
 Generated archives — their names are fixed, the download page links to them
 directly:
