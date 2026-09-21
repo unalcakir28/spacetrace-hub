@@ -114,7 +114,9 @@ From shared `spacetrace-tools` plugin (install it, and full list, live in worksp
 | ---- | ---- |
 | `security-reviewer` (agent) | **This repo only.** Two credential, router-group authorization, `import_snapshot` trust boundary, SMTP secret — threat model, not house rule |
 | `core-pin-guard` (agent) | Core API diff before move pin |
+| `release-landed` (skill) | After cut release: archive and image downloadable, site fallback bumped, site rebuilt |
 | `pin-move-guard` (hook) | Warn before `cargo update` move pin |
+| `release-landed-guard` (hook) | At session start: release published that site fallback or last build predate |
 | `block-changelog-edit` (hook) | Edit/Write on generated `CHANGELOG.md` |
 | `rustfmt-on-edit` (hook) | Format edited `.rs` file |
 
