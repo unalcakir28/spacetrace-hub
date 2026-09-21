@@ -119,6 +119,7 @@ From shared `spacetrace-tools` plugin (install it, and full list, live in worksp
 | `release-landed-guard` (hook) | At session start: release published that site fallback or last build predate |
 | `block-changelog-edit` (hook) | Edit/Write on generated `CHANGELOG.md` |
 | `rustfmt-on-edit` (hook) | Format edited `.rs` file |
+| `doc-number-guard` (hook) | At Stop: count in doc no match tree. Here it be README test count — the one "Numbers go stale" below be about |
 
 Also `doc-drift-auditor`, `code-reviewer` and `test-writer`.
 
