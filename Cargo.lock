@@ -1574,13 +1574,13 @@ dependencies = [
 
 [[package]]
 name = "spacetrace-buildinfo"
-version = "0.9.1"
-source = "git+https://github.com/unalcakir28/spacetrace#e32d5ae6e57b75dd77943a953b576a718c5fd2e7"
+version = "0.10.0"
+source = "git+https://github.com/unalcakir28/spacetrace#67c1bd01c81d0e4484e1f23f41b6d1df7a385646"
 
 [[package]]
 name = "spacetrace-changelog"
-version = "0.9.1"
-source = "git+https://github.com/unalcakir28/spacetrace#e32d5ae6e57b75dd77943a953b576a718c5fd2e7"
+version = "0.10.0"
+source = "git+https://github.com/unalcakir28/spacetrace#67c1bd01c81d0e4484e1f23f41b6d1df7a385646"
 dependencies = [
  "serde",
  "serde_json",
@@ -1588,8 +1588,8 @@ dependencies = [
 
 [[package]]
 name = "spacetrace-diff"
-version = "0.9.1"
-source = "git+https://github.com/unalcakir28/spacetrace#e32d5ae6e57b75dd77943a953b576a718c5fd2e7"
+version = "0.10.0"
+source = "git+https://github.com/unalcakir28/spacetrace#67c1bd01c81d0e4484e1f23f41b6d1df7a385646"
 dependencies = [
  "serde",
  "spacetrace-scan-core",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "spacetrace-hub"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1622,19 +1622,20 @@ dependencies = [
 
 [[package]]
 name = "spacetrace-scan-core"
-version = "0.9.1"
-source = "git+https://github.com/unalcakir28/spacetrace#e32d5ae6e57b75dd77943a953b576a718c5fd2e7"
+version = "0.10.0"
+source = "git+https://github.com/unalcakir28/spacetrace#67c1bd01c81d0e4484e1f23f41b6d1df7a385646"
 dependencies = [
  "libc",
  "rayon",
  "serde",
+ "tempfile",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "spacetrace-store"
-version = "0.9.1"
-source = "git+https://github.com/unalcakir28/spacetrace#e32d5ae6e57b75dd77943a953b576a718c5fd2e7"
+version = "0.10.0"
+source = "git+https://github.com/unalcakir28/spacetrace#67c1bd01c81d0e4484e1f23f41b6d1df7a385646"
 dependencies = [
  "anyhow",
  "gethostname",
@@ -1712,7 +1713,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
