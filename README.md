@@ -178,7 +178,7 @@ The dashboard is server-rendered by hand: a self-hosted tool that needs
 ## Develop
 
 ```bash
-cargo test                                  # 123 tests, no service containers
+cargo test                                  # 124 tests, no service containers
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```

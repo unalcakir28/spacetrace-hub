@@ -395,6 +395,40 @@ async fn a_body_that_is_not_a_snapshot_is_a_client_error() {
     assert_eq!(hub.targets(), 0);
 }
 
+/// A snapshot dated ahead of the hub would stay the newest of its target for
+/// good, so the store refuses it — and that is the sender's clock, a 400.
+/// The digest is cleared ("pre-v3, no digest") so the date is the only thing
+/// wrong with it; with the digest left in place the edit would be refused as
+/// corruption instead, and this would pass for the wrong reason.
+#[tokio::test]
+async fn a_snapshot_dated_days_ahead_is_a_client_error() {
+    let hub = start_hub(None).await;
+    let agent = hub.new_agent_token("nas");
+
+    let work = tempfile::tempdir().unwrap();
+    let wire = work.path().join("wire.sqlite");
+    std::fs::write(&wire, snapshot_body("nas", "var", 60_000)).unwrap();
+    Connection::open(&wire)
+        .unwrap()
+        .execute(
+            "UPDATE scans SET started_at = started_at + 3 * 86400, content_hash = NULL",
+            [],
+        )
+        .unwrap();
+
+    let response = client()
+        .post(hub.url("/snapshots"))
+        .bearer_auth(&agent)
+        .body(std::fs::read(&wire).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let reason = response.text().await.unwrap();
+    assert!(reason.contains("in the future"), "{reason}");
+    assert_eq!(hub.targets(), 0);
+}
+
 #[tokio::test]
 async fn a_body_claiming_to_be_zstd_but_is_not_is_a_client_error() {
     let hub = start_hub(None).await;

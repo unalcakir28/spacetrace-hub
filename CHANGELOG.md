@@ -10,6 +10,12 @@ Versions marked *development milestone* were never tagged and have no
 downloadable files. They are recorded because the work happened, not
 because anyone can install them.
 
+## Unreleased
+
+### Fixed
+
+- A pushed snapshot is checked in full before it is stored: its tree must be sound and every value of the right type. One with a correct checksum and a broken tree used to be stored anyway, after which every page that read it failed; it is now refused with 400 and nothing of it is kept. A snapshot dated more than a day in the future is refused too, because it would have stayed the newest of its machine for good - so an agent whose clock is that far ahead now gets 400 on every push until its clock is fixed.
+
 ## 0.5.0 — 2026-09-14
 
 ### Added
